@@ -1,0 +1,85 @@
+{{define "content-rules"}}
+<div class="row justify-content-center">
+    <div class="col-lg-9">
+        <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+            <div>
+                <h5 class="mb-0 fw-bold">积分规则</h5>
+                <span class="text-muted small">当前配置实时生效，适用于所有用户</span>
+            </div>
+        </div>
+
+        <div class="card app-card mb-4 fade-in-up">
+            <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">一、如何获取积分</h6></div>
+            <div class="card-body p-4">
+                <div class="rule-item">
+                    <div class="fw-semibold">注册赠送</div>
+                    <div class="text-muted small">
+                        {{if eq .InitP "0"}}新注册账号暂无初始积分{{else}}新用户注册成功即可获得 <strong class="points-text">{{comma .InitP}}</strong> 积分{{end}}。
+                    </div>
+                </div>
+                <div class="rule-item">
+                    <div class="fw-semibold">每日签到</div>
+                    <div class="text-muted small">
+                        {{if eq .Mode "random"}}每次随机获得 <strong class="points-text">{{.CheckinM}} ~ {{.CheckinX}}</strong> 积分{{else}}每次签到固定获得 <strong class="points-text">{{comma .CheckinF}}</strong> 积分{{end}}，同一自然日限一次。
+                    </div>
+                </div>
+                <div class="rule-item">
+                    <div class="fw-semibold">兑换码兑换</div>
+                    <div class="text-muted small">凭有效兑换码在「积分兑换」页一次性兑换对应积分。</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card app-card mb-4 fade-in-up">
+            <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">二、如何消耗积分</h6></div>
+            <div class="card-body p-4">
+                <div class="rule-item">
+                    <div class="fw-semibold">AI 图片创作</div>
+                    <div class="text-muted small">
+                        每次生成按张计费，每张 <strong class="points-text">{{comma .GenCost}}</strong> 积分，一次最多 4 张，消耗明细在「创作记录」页清晰可查。
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card app-card mb-4 fade-in-up">
+            <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">三、常见说明</h6></div>
+            <div class="card-body p-4">
+                <div class="accordion accordion-flush" id="rulesAcc">
+                    <div class="accordion-item">
+                        <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#rules1">积分不足时能否继续创作？</button></h2>
+                        <div id="rules1" class="accordion-collapse collapse" data-bs-parent="#rulesAcc">
+                            <div class="accordion-body text-muted small">不能。余额需大于等于本次所需积分方可生成，不足时可先去签到或兑换积分。</div>
+                        </div>
+                    </div>
+                    <div class="accordion-item">
+                        <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#rules2">积分明细怎么看？</button></h2>
+                        <div id="rules2" class="accordion-collapse collapse" data-bs-parent="#rulesAcc">
+                            <div class="accordion-body text-muted small">登录后在「积分明细」页可查看每一笔获得与消耗，包含变动后的余额。</div>
+                        </div>
+                    </div>
+                    <div class="accordion-item">
+                        <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#rules3">账号被禁用会怎样？</button></h2>
+                        <div id="rules3" class="accordion-collapse collapse" data-bs-parent="#rulesAcc">
+                            <div class="accordion-body text-muted small">被禁用的账号无法登录；积分与历史作品由管理员保留，如有异议请联系管理员核实。</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card app-card fade-in-up">
+            <div class="card-body p-4">
+                <div class="rule-item">
+                    <div class="fw-semibold">总则</div>
+                    <div class="text-muted small mb-3">平台保留完善与调整积分规则的权利，规则以本页实时展示为准；申诉或疑问请联系管理员。</div>
+                    <div class="d-flex gap-2 flex-wrap">
+                        <a href="/register" class="btn btn-primary">立即加入</a>
+                        <a href="/leaderboard" class="btn btn-outline-primary">查看排行榜</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

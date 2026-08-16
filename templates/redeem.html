@@ -1,0 +1,48 @@
+{{define "content-redeem"}}
+<div class="row justify-content-center">
+    <div class="col-md-6 col-lg-5">
+        <div class="card app-card fade-in-up">
+            <div class="card-header py-3 px-4 text-center">
+                <h5 class="mb-0 fw-bold">积分兑换</h5>
+            </div>
+            <div class="card-body p-4">
+                {{if .Message}}
+                {{if eq .MessageType "error"}}
+                <div class="alert alert-danger dismissible-auto" role="alert">{{.Message}}</div>
+                {{else}}
+                <div class="alert alert-success dismissible-auto" role="alert">{{.Message}}</div>
+                {{end}}
+                {{end}}
+                <p class="text-muted small mb-4">输入兑换码，即可将对应积分充入你的账户。</p>
+                <form method="POST" action="/redeem" data-submit="loading" novalidate>
+                    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+                    <div class="mb-4">
+                        <label class="form-label fw-semibold">兑换码</label>
+                        <input type="text" name="code" class="form-control form-control-lg text-center" placeholder="输 入 兑 换 码" required autocomplete="off" autofocus maxlength="32">
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100 btn-lg btn-loading" data-loading-text="兑换中...">
+                        <span>立即兑换</span>
+                    </button>
+                </form>
+                <div class="d-flex justify-content-between align-items-center mt-4 pt-3 border-top small text-muted">
+                    <span>当前积分</span>
+                    <span class="points-text fs-6">{{comma .Points}}</span>
+                </div>
+                {{if .History}}
+                <hr>
+                <h6 class="fw-bold mb-3">最近兑换记录</h6>
+                <ul class="list-unstyled mb-0 small">
+                    {{range .History}}
+                    <li class="d-flex justify-content-between align-items-center gap-2 py-2 border-bottom">
+                        <span class="font-monospace fw-semibold me-2">{{.Code}}</span>
+                        <span class="text-muted text-nowrap">{{.UsedAt}}</span>
+                        <span class="points-text text-nowrap">+{{comma .Points}}</span>
+                    </li>
+                    {{end}}
+                </ul>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

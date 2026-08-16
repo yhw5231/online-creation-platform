@@ -1,0 +1,76 @@
+{{define "content-admin-notices"}}
+<div class="card app-card mb-4 fade-in-up">
+    <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">发布公告</h6></div>
+    <div class="card-body p-4">
+        <form method="POST" action="/admin/notice/add" class="row g-3">
+            <input type="hidden" name="_csrf" value="{{.CSRF}}">
+            <div class="col-md-4">
+                <label class="form-label fw-semibold">公告标题（可选）</label>
+                <input name="title" class="form-control" maxlength="200" placeholder="例如：全站签到积分翻倍">
+            </div>
+            <div class="col-md-8">
+                <label class="form-label fw-semibold">公告内容</label>
+                <div class="d-flex gap-2">
+                    <textarea name="content" class="form-control" rows="2" maxlength="4000" placeholder="公告正文（最多 4000 字）" required></textarea>
+                    <div class="d-flex flex-column justify-content-between">
+                        <label class="d-flex align-items-center gap-2 small">
+                            <input type="checkbox" name="is_active" value="1" class="form-check-input m-0" checked>
+                            立即启用
+                        </label>
+                        <button type="submit" class="btn btn-primary btn-sm">发布公告</button>
+                    </div>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card app-card fade-in-up">
+    <div class="card-header py-3 px-4 d-flex justify-content-between align-items-center">
+        <h6 class="mb-0 fw-bold">公告列表（含历史）</h6>
+        <span class="text-muted small">共 {{len .Notices}} 条</span>
+    </div>
+    <div class="card-body p-0">
+        {{if .Notices}}
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead><tr>
+                    <th class="px-4">标题 / 内容</th>
+                    <th class="px-2">状态</th>
+                    <th class="px-2">发布时间</th>
+                    <th class="px-4 text-end">操作</th>
+                </tr></thead>
+                <tbody>
+                    {{range .Notices}}
+                    <tr>
+                        <td class="px-4">
+                            {{if .Title}}<div class="fw-semibold">{{.Title}}</div>{{end}}
+                            <div class="text-muted small">{{trunc .Content 60}}</div>
+                        </td>
+                        <td class="px-2">
+                            {{if .Active}}<span class="badge text-bg-success">启用</span>{{else}}<span class="badge text-bg-secondary">停用</span>{{end}}
+                        </td>
+                        <td class="px-2 text-muted small text-nowrap">{{.CreatedAt}}</td>
+                        <td class="px-4 text-end text-nowrap">
+                            <form method="POST" action="/admin/notice/toggle" class="d-inline">
+                                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary">{{if .Active}}停用{{else}}启用{{end}}</button>
+                            </form>
+                            <form method="POST" action="/admin/notice/delete" class="d-inline" data-confirm="确定删除这条公告？删除后不可恢复。">
+                                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <button type="submit" class="btn btn-sm btn-outline-danger">删除</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{else}}
+        <div class="text-center text-muted py-5">还没有公告，发布第一条吧</div>
+        {{end}}
+    </div>
+</div>
+{{end}}

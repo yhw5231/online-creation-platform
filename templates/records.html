@@ -1,0 +1,100 @@
+{{define "content-records"}}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div>
+        <h5 class="mb-0 fw-bold">创作记录</h5>
+        <span class="text-muted small">每一张生成的作品都会在这里归档</span>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+        <span class="badge text-bg-light">本页 {{len .Records}} 张 / 共 {{if .Total}}{{.Total}}{{else}}0{{end}} 张</span>
+        <span class="badge text-bg-light">累计消耗 <strong class="text-danger">{{comma .TotalCost}}</strong> 积分</span>
+        <a href="/create" class="btn btn-primary btn-sm">＋ 新建创作</a>
+    </div>
+</div>
+<div class="alert alert-info mb-3 d-flex align-items-start gap-2 py-2 px-3" role="alert">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0 mt-1" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+    <span class="small">提示：生成的图片保存在服务器本地，<strong>服务器可能定期清理旧数据</strong>。请及时下载保存图片到本地，或点击图片查看大图后下载原图。</span>
+</div>
+<form method="GET" action="/records" class="mb-3 d-flex gap-2" style="max-width: 360px;">
+    <input type="text" name="q" class="form-control" placeholder="按提示词搜索..." value="{{.Query}}" autocomplete="off">
+    <button type="submit" class="btn btn-primary btn-sm px-3">搜索</button>
+    {{if .Query}}<a href="/records" class="btn btn-outline-secondary btn-sm px-3">清除</a>{{end}}
+</form>
+
+{{if gt (len .Records) 0}}
+<div class="row g-3">
+    {{range .Records}}
+    <div class="col-6 col-md-4 col-xl-3">
+        <div class="record-card">
+            {{if .ImageURL}}
+            <img src="{{.ImageURL}}" class="record-cover" data-lightbox loading="lazy" alt="创作缩略图" data-cache-key="{{.ID}}-0" {{if .AltURLs}}data-alt="{{index .AltURLs 0}}"{{end}}>
+            {{else}}
+            <div class="record-cover record-cover-empty">
+                <span class="text-muted small">{{if eq .Status "failed"}}制作失败{{else}}暂无图片{{end}}</span>
+            </div>
+            {{end}}
+            {{if gt (len .ImagesSub) 0}}
+            <div class="record-subs">
+                {{range $i, $img := .ImagesSub}}<img src="{{$img}}" loading="lazy" data-lightbox alt="作品缩略图" data-cache-key="{{$.ID}}-{{add $i 1}}" {{if ge (len $.AltURLs) (add $i 2)}}data-alt="{{index $.AltURLs (add $i 1)}}"{{end}}>{{end}}
+            </div>
+            {{end}}
+            <div class="record-body">
+                <div class="d-flex align-items-start gap-1 mb-2">
+                    <p class="record-prompt mb-0 flex-grow-1" title="{{.Prompt}}">{{.Prompt}}</p>
+                    <button type="button" class="btn btn-sm btn-outline-secondary copy-btn flex-shrink-0" data-copy="{{.Prompt}}" title="复制提示词" aria-label="复制提示词">复制</button>
+                </div>
+                <div class="d-flex flex-wrap gap-1 mb-2">
+                    <span class="badge text-bg-primary text-bg-tint">{{if .Channel}}{{.Channel}}{{else}}{{.Model}}{{end}}</span>
+                    <span class="badge text-bg-light">×{{.N}}</span>
+                    <span class="badge text-bg-light">{{.AspectRatio}} · {{.Resolution}}</span>
+                    {{if eq .Status "processing"}}<span class="badge text-bg-primary">生成中</span>
+                    {{else if eq .Status "failed"}}<span class="badge text-bg-danger">失败</span>{{end}}
+                </div>
+                {{if eq .Status "failed"}}
+                <div class="small text-danger mb-1" title="{{.ErrorMsg}}">{{if .ErrorMsg}}{{trunc .ErrorMsg 50}}<br>{{end}}本次积分已退回。</div>
+                {{end}}
+                <div class="d-flex justify-content-between align-items-center small">
+                    {{if eq .Status "failed"}}<span class="text-danger">已退回积分</span>
+                    {{else}}<span class="text-muted">消耗 <span class="cost-badge">{{comma .CostPoints}}</span> 积分</span>{{end}}
+                    <span class="text-muted">{{.CreatedAt}}</span>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mt-2 pt-2 record-foot">
+                    <span class="text-muted small">#{{.ID}}</span>
+                    <div class="d-flex align-items-center gap-2">
+                        {{if eq .Status "success"}}
+                        {{if .ImageURL}}
+                        <a href="{{.ImageURL}}" download data-dl class="btn btn-sm btn-outline-secondary" title="下载图片到本地">下载</a>
+                        {{end}}
+                        {{if .AltURLs}}
+                        <a href="{{index .AltURLs 0}}" download target="_blank" rel="noopener" class="btn btn-sm btn-outline-primary" title="服务器本地文件可能已清理，经外部存储下载备份">备用下载</a>
+                        {{end}}
+                        {{end}}
+                        <a href="/create?prompt={{urlquery .Prompt}}" class="btn btn-sm btn-outline-primary" title="沿用这条提示词再次创作">再生成</a>
+                        <form method="POST" action="/records/delete" class="d-inline" data-submit="loading">
+                            <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                            <input type="hidden" name="id" value="{{.ID}}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger btn-loading" data-loading-text="..." data-confirm="确定删除这条创作记录吗？">删除</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+{{else}}
+<div class="card app-card">
+    <div class="card-body">
+        <div class="empty-state py-5">
+            <div class="empty-state-icon">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+            </div>
+            <p class="mb-1 fs-5 fw-semibold">{{if .Query}}未找到匹配的记录{{else}}还没有创作记录{{end}}</p>
+            <p class="text-muted mb-3">{{if .Query}}没有与「{{.Query}}」相关的作品，换个关键词试试{{else}}快去生成你的第一张 AI 作品吧{{end}}</p>
+            {{if .Query}}<a href="/records" class="btn btn-outline-secondary">清除搜索</a>
+            {{else}}<a href="/create" class="btn btn-primary">开始创作</a>{{end}}
+        </div>
+    </div>
+</div>
+{{end}}
+{{template "pagination" .}}
+{{end}}

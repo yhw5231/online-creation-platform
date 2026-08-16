@@ -1,0 +1,182 @@
+{{define "content-create"}}
+<div class="row g-4">
+    <div class="col-lg-8">
+        {{if .Error}}<div class="alert alert-danger dismissible-auto mb-4" role="alert">{{.Error}}</div>{{end}}
+        <div class="alert alert-info mb-4 d-flex align-items-start gap-2" role="alert">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0 mt-1" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+            <span class="small">生成的图片仅保存在服务器本地，<strong>服务器可能定期清理旧数据</strong>。任务完成后请及时下载保存到你自己的设备。</span>
+        </div>
+        {{if lt .Points .Cost}}
+        <div class="alert alert-warning mb-4 d-flex justify-content-between align-items-center gap-2 flex-wrap" role="alert">
+            <span class="small">当前积分 <strong>{{.Points}}</strong>，本次创作至少需要 <strong>{{.Cost}}</strong> 积分，积分不足。先 <a href="/checkin" class="alert-link">每日签到</a> 或 <a href="/redeem" class="alert-link">兑换积分</a> 再来创作吧。</span>
+            <a href="/points" class="btn btn-sm btn-outline-warning">查看积分明细</a>
+        </div>
+        {{end}}
+        <div class="card app-card fade-in-up">
+            <div class="card-header py-3 px-4 d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <h5 class="mb-0 fw-bold">AI 图片创作</h5>
+                <span class="badge text-bg-light">积分消耗 <strong class="text-primary">{{.Cost}}</strong> 积分/张</span>
+            </div>
+            <div class="card-body p-4">
+                <form method="POST" action="/generate" data-submit="loading">
+                    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+                    <input type="hidden" name="_gen_token" value="{{.GenToken}}">
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">提示词</label>
+                        <textarea name="prompt" class="form-control prompt-input" rows="4" maxlength="4000" placeholder="描述你想生成的画面，例如：赛博朋克城市的雨夜，霓虹灯光在潮湿的街道上倒映，电影感构图" required>{{if .LastPrompt}}{{.LastPrompt}}{{end}}</textarea>
+                        <div class="d-flex justify-content-between align-items-center mt-1">
+                            <div class="d-flex align-items-center gap-3">
+                                <button type="button" class="btn btn-link btn-sm p-0 text-primary" id="toggleSamples">灵感示例</button>
+                                <button type="button" class="btn btn-link btn-sm p-0 text-muted" id="clearPrompt" aria-label="清空提示词">清空</button>
+                            </div>
+                            <span class="char-count text-muted" id="charCount">0 / 4000</span>
+                        </div>
+                        <div class="sample-prompts d-none mt-2">
+                            <span class="sample-chip" data-prompt="赛博朋克城市夜景，霓虹灯光，雨后的街道倒影，电影感">城市夜景</span>
+                            <span class="sample-chip" data-prompt="阳光海浪沙滩，蓝天白云，夏日度假氛围，高清摄影">夏日海滩</span>
+                            <span class="sample-chip" data-prompt="软萌猫咪头像，扁平插画风格，背景干净简约">猫咪头像</span>
+                            <span class="sample-chip" data-prompt="中国水墨画风格的山川云雾，留白，意境深远">水墨山川</span>
+                            <span class="sample-chip" data-prompt="太空飞船探索未知星球，科幻概念美术，细节丰富">太空飞船</span>
+                        </div>
+                    </div>
+
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">生成渠道</label>
+                            {{if .Channels}}
+                            <select name="channel" class="form-select" id="channelSelect" required>
+                                {{range .Channels}}
+                                <option value="{{.Idx}}" data-nsfw="{{.NSFWStr}}" data-resolutions="{{.ResolutionsCSV}}" {{if eq .Idx $.DefChannelIdx}}selected{{end}}>{{.Name}}</option>
+                                {{end}}
+                            </select>
+                            <div class="form-text">按所选渠道生成，使用该渠道配置的默认模型与分辨率档位。</div>
+                            {{else}}
+                            <div class="alert alert-warning small py-2 mb-0">暂无可用的生成渠道，请联系管理员在系统设置中配置。</div>
+                            {{end}}
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label fw-semibold">生成数量</label>
+                            <select name="n" class="form-select">
+                                <option value="1" {{if or (eq .LastN "") (eq .LastN "1")}}selected{{end}}>1 张</option>
+                                <option value="2" {{if eq .LastN "2"}}selected{{end}}>2 张</option>
+                                <option value="3" {{if eq .LastN "3"}}selected{{end}}>3 张</option>
+                                <option value="4" {{if eq .LastN "4"}}selected{{end}}>4 张</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">宽高比</label>
+                            <select name="aspect_ratio" class="form-select">
+                                <option value="1:1" {{if or (eq .LastRatio "") (eq .LastRatio "1:1")}}selected{{end}}>1:1 方形</option>
+                                <option value="16:9" {{if eq .LastRatio "16:9"}}selected{{end}}>16:9 横屏</option>
+                                <option value="4:3" {{if eq .LastRatio "4:3"}}selected{{end}}>4:3 横屏</option>
+                                <option value="3:4" {{if eq .LastRatio "3:4"}}selected{{end}}>3:4 竖屏</option>
+                                <option value="9:16" {{if eq .LastRatio "9:16"}}selected{{end}}>9:16 竖屏</option>
+                                <option value="21:9" {{if eq .LastRatio "21:9"}}selected{{end}}>21:9 超宽</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">分辨率</label>
+                            <select name="resolution" class="form-select" id="resolutionSelect">
+                                {{$cur := $.DefResolution}}
+                                {{range .Channels}}{{if eq .Idx $.DefChannelIdx}}{{range .Resolutions}}
+                                <option value="{{.}}" {{if eq $cur .}}selected{{end}}>{{.}}</option>
+                                {{end}}{{end}}{{end}}
+                            </select>
+                            <div class="form-text">分辨率档位由所选渠道支持范围决定。</div>
+                        </div>
+                        <div class="col-12">
+                            <div class="d-flex align-items-center gap-2 mt-2 pt-3 border-top">
+                                <span class="text-muted small">渠道中带 NSFW 标注的为 NSFW 渠道，按所选渠道生成。</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mt-4 pt-3 border-top">
+                        <div>
+                            <span class="text-muted small" data-base-cost="{{.Cost}}" data-points="{{.Points}}">本次共 <strong class="text-primary" id="genCount">1</strong> 张，预计扣除 <strong class="text-primary" id="totalCost">{{.Cost}}</strong> 积分</span>
+                            <div class="text-muted small mt-1" id="kbHint">提示：Ctrl / ⌘ + Enter 可快速提交</div>
+                            <div id="insufficientHint" class="d-none text-danger small mt-1"></div>
+                        </div>
+                        <button type="submit" id="genSubmit" class="btn btn-primary btn-lg px-5 btn-loading" data-loading-text="正在提交...">
+                            <span>开始创作</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        {{if .TaskID}}
+        <div class="card app-card mt-4 fade-in-up">
+            <div class="card-header py-3 px-4">
+                <h6 class="mb-0 fw-bold">生成进度 <span class="text-muted small fw-normal">#{{.TaskID}}</span></h6>
+            </div>
+            <div class="card-body p-4" id="taskDetail" data-task-id="{{.TaskID}}" data-task-status="{{.TaskStatus}}">
+                <div class="d-flex align-items-center gap-2 text-muted">
+                    <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                    <span class="small">任务已提交，正在排队生成…页面将自动刷新进度。</span>
+                </div>
+                <noscript><p class="text-muted small mt-2 mb-0">请稍后刷新页面查看任务进度。</p></noscript>
+            </div>
+        </div>
+        {{end}}
+
+        <div class="card app-card mt-4 fade-in-up">
+            <div class="card-header py-3 px-4 d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <div>
+                    <h6 class="mb-0 fw-bold">最近任务</h6>
+                    <span class="text-muted small">最近 3 条进行中或已完成的任务，完成后请及时下载图片</span>
+                </div>
+                <a href="/records" class="btn btn-sm btn-outline-primary">创作记录</a>
+            </div>
+            <div class="card-body p-3" id="recentTasks">
+                {{range .RecentTasks}}
+                <div class="recent-task d-flex align-items-start gap-3 py-2 px-2 rounded" data-task-id="{{.ID}}" data-task-status="{{.Status}}">
+                    <div class="recent-task-thumb flex-shrink-0">
+                        {{if .ImageURL}}<img src="{{.ImageURL}}" alt="任务缩略图" loading="lazy">
+                        {{else}}<span class="recent-task-ph">{{if eq .Status "success"}}无图{{else if eq .Status "failed"}}失败{{else}}…{{end}}</span>{{end}}
+                    </div>
+                    <div class="flex-grow-1 min-w-0">
+                        <p class="record-prompt mb-1" title="{{.Prompt}}">{{.Prompt}}</p>
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <span class="text-muted small">#{{.ID}} · {{.CreatedAt}} · ×{{.N}}</span>
+                            {{if eq .Status "processing"}}<span class="badge text-bg-primary">生成中</span>
+                            {{else if eq .Status "success"}}<span class="badge text-bg-success">已完成</span>
+                            {{else}}<span class="badge text-bg-danger">失败</span>{{end}}
+                        </div>
+                        {{if eq .Status "failed"}}<div class="text-danger small mt-1" title="{{.ErrorMsg}}">{{if .ErrorMsg}}{{trunc .ErrorMsg 40}} · {{end}}积分已退回</div>{{end}}
+                    </div>
+                </div>
+                {{else}}
+                <p class="text-muted small text-center py-3 mb-0">还没有任务，开始你的第一次创作吧</p>
+                {{end}}
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card app-card mb-4">
+            <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">创作技巧</h6></div>
+            <div class="card-body p-4">
+                <ul class="tip-list">
+                    <li>提示词越具体，画面越符合预期</li>
+                    <li>可叠加风格词：赛博朋克、水彩、油画…</li>
+                    <li>分辨率越高细节越丰富，生成耗时也越长</li>
+                    <li>一次可生成多张，按张扣积分</li>
+                    <li>提交后任务异步生成，页面会自动刷新进度</li>
+                </ul>
+            </div>
+        </div>
+        <div class="card app-card">
+            <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">积分获取</h6></div>
+            <div class="card-body p-4">
+                <p class="mb-2">· 每日签到，稳定获取积分</p>
+                <p class="mb-3">· 使用兑换码兑换积分</p>
+                <div class="d-grid gap-2">
+                    <a href="/checkin" class="btn btn-outline-primary btn-sm">去签到</a>
+                    <a href="/redeem" class="btn btn-outline-primary btn-sm">去兑换</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

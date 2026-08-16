@@ -1,0 +1,79 @@
+{{define "content-users"}}
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+    <h5 class="mb-0 fw-bold">用户管理</h5>
+    <span class="badge text-bg-light">{{len .Users}} 位用户{{if .Query}} · 筛选“{{.Query}}”{{end}}</span>
+</div>
+<form method="GET" action="/admin/users" class="mb-3 d-flex gap-2" style="max-width: 340px;">
+    <input type="text" name="q" class="form-control" placeholder="按用户名搜索..." value="{{.Query}}" autocomplete="off">
+    <button type="submit" class="btn btn-primary btn-sm px-3">搜索</button>
+    {{if .Query}}<a href="/admin/users" class="btn btn-outline-secondary btn-sm px-3">清除</a>{{end}}
+</form>
+<div class="card app-card fade-in-up">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover app-table mb-0">
+                <thead>
+                    <tr><th>ID</th><th>用户名</th><th>积分</th><th>角色</th><th>状态</th><th>注册时间</th><th class="text-end">操作</th></tr>
+                </thead>
+                <tbody>
+                    {{range .Users}}
+                    <tr>
+                        <td class="text-muted">{{.ID}}</td>
+                        <td class="fw-semibold">{{.Username}}{{if eq $.CurrentID .ID}} <span class="badge text-bg-primary">我</span>{{end}}</td>
+                        <td><span class="points-text">{{comma .Points}}</span></td>
+                        <td>
+                            {{if eq .Role "admin"}}<span class="badge text-bg-primary">管理员</span>
+                            {{else}}<span class="badge text-bg-light">普通用户</span>{{end}}
+                        </td>
+                        <td>
+                            {{if eq .Status 1}}<span class="badge text-bg-success">正常</span>
+                            {{else}}<span class="badge text-bg-secondary">已禁用</span>{{end}}
+                        </td>
+                        <td class="text-muted small">{{.CreatedAt}}</td>
+                        <td class="text-end">
+                            {{if eq .Role "admin"}}
+                            {{if ne $.CurrentID .ID}}<form method="POST" action="/admin/user/demote" class="d-inline" data-submit="loading">
+                                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary btn-loading" data-loading-text="..." data-confirm="确定要将 “{{.Username}}” 降为普通用户吗？">降级</button>
+                            </form>{{end}}
+                            {{else}}
+                            <form method="POST" action="/admin/user/promote" class="d-inline" data-submit="loading">
+                                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <button type="submit" class="btn btn-sm btn-outline-primary btn-loading" data-loading-text="..." data-confirm="确定要将 “{{.Username}}” 设为管理员吗？">设为管理员</button>
+                            </form>
+                            {{end}}
+                            {{if eq .Status 1}}
+                            <form method="POST" action="/admin/user/disable" class="d-inline {{if eq $.CurrentID .ID}}disabled{{end}}" data-submit="loading">
+                                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <button type="submit" class="btn btn-sm btn-outline-danger btn-loading {{if eq $.CurrentID .ID}}disabled{{end}}" data-loading-text="..." data-confirm="确定要禁用用户 “{{.Username}}” 吗？禁用后该用户将无法登录。" {{if eq $.CurrentID .ID}}disabled{{end}}>禁用</button>
+                            </form>
+                            {{else}}
+                            <form method="POST" action="/admin/user/enable" class="d-inline" data-submit="loading">
+                                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <button type="submit" class="btn btn-sm btn-outline-success btn-loading" data-loading-text="..." data-confirm="确定要启用用户 “{{.Username}}” 吗？">启用</button>
+                            </form>
+                            {{end}}
+                            <div class="mt-2">
+                                <form method="POST" action="/admin/user/adjust-points" class="d-flex gap-1" data-submit="loading">
+                                    <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                    <input type="hidden" name="id" value="{{.ID}}">
+                                    <input type="number" name="delta" class="form-control form-control-sm" style="width: 84px" placeholder="±积分" step="1" min="-100000" max="100000" autocomplete="off">
+                                    <button type="submit" class="btn btn-sm btn-outline-info btn-loading" data-loading-text="..." data-confirm="确认调整该用户的积分余额？负数表示扣除，正数表示追加。">调整</button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {{else}}
+                    <tr><td colspan="7" class="text-center py-4 text-muted">暂无用户</td></tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{template "pagination" .}}
+    </div>
+</div>
+{{end}}

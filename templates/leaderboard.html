@@ -1,0 +1,80 @@
+{{define "content-leaderboard"}}
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+    <div>
+        <h5 class="mb-0 fw-bold">创作排行榜</h5>
+        <span class="text-muted small">按累计创作次数排名，管理员不参与排行</span>
+    </div>
+    <a href="/create" class="btn btn-primary btn-sm">去创作</a>
+</div>
+
+{{if .Me}}
+<div class="card app-card mb-3 fade-in-up">
+    <div class="card-body py-3 px-4 d-flex align-items-center justify-content-between flex-wrap gap-2">
+        <div class="text-muted small">
+            我的排名 <strong class="points-text fw-bold">{{.Me.Rank}}</strong>
+            <span class="mx-2 text-body-tertiary">|</span>
+            今日创作 <strong class="points-text fw-bold">{{.Me.Today}}</strong> 次
+            <span class="mx-2 text-body-tertiary">|</span>
+            累计创作 <strong class="points-text fw-bold">{{.Me.Total}}</strong> 次
+        </div>
+        <div class="d-inline-flex align-items-center gap-2 flex-wrap">
+            {{if .Top}}<a href="/create" class="btn btn-sm btn-outline-primary">我也要上榜</a>{{end}}
+            <a href="/records" class="btn btn-sm btn-outline-secondary">我的记录</a>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{if .Top}}
+<div class="card app-card fade-in-up">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover app-table mb-0">
+                <thead>
+                    <tr>
+                        <th class="text-center" style="width: 70px;">排名</th>
+                        <th>创作者</th>
+                        <th class="text-end">今日创作</th>
+                        <th class="text-end">累计创作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Rankings}}
+                    <tr>
+                        <td class="text-center">
+                            {{if eq .Rank 1}}<span class="rank-badge rank-gold">1</span>
+                            {{else if eq .Rank 2}}<span class="rank-badge rank-silver">2</span>
+                            {{else if eq .Rank 3}}<span class="rank-badge rank-bronze">3</span>
+                            {{else}}<span class="rank-badge rank-plain">{{.Rank}}</span>{{end}}
+                        </td>
+                        <td class="fw-semibold">
+                            <span class="avatar-circle me-2 d-inline-flex align-items-center justify-content-center">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-3.33 0-10 1.67-10 5v1h20v-1c0-3.33-6.67-5-10-5z"/></svg>
+                            </span>
+                            {{.Name}}
+                        </td>
+                        <td class="text-end points-text fw-semibold">{{.Today}} 次</td>
+                        <td class="text-end text-muted small">{{.Total}} 次</td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<p class="text-muted small mt-3 mb-0">排行榜每次访问实时计算，仅计入成功生成的任务与正常状态的普通用户，管理员不计入。</p>
+{{else}}
+<div class="card app-card">
+    <div class="card-body">
+        <div class="empty-state py-5">
+            <div class="empty-state-icon">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v4a5 5 0 0 1-10 0z"/><path d="M7 8H4a2 2 0 0 0 0 4h3"/><path d="M17 8h3a2 2 0 0 1 0 4h-3"/></svg>
+            </div>
+            <p class="mb-1 fs-5 fw-semibold">榜单还是空的</p>
+            <p class="text-muted mb-3">还没有创作者上榜，快来成为第一名吧</p>
+            <a href="/register" class="btn btn-primary">立即加入</a>
+        </div>
+    </div>
+</div>
+{{end}}
+{{end}}

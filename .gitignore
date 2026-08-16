@@ -1,0 +1,20 @@
+# 运行时数据（数据库、生成的图片）
+data/
+
+# 编译产物
+*.exe
+*.out
+debug/
+
+# Go 工具缓存
+.gocache/
+.gopath/
+
+# 日志
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+# 编辑器备份文件
+*~

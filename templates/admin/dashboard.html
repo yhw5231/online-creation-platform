@@ -1,0 +1,155 @@
+{{define "content-dashboard"}}
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+    <div>
+        <h5 class="mb-0 fw-bold">数据概览</h5>
+        <span class="text-muted small">平台运行指标一览</span>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+        <a href="/admin/backup" class="btn btn-outline-secondary btn-sm" data-confirm="下载数据库备份文件？">下载数据备份</a>
+        <a href="/admin/users" class="btn btn-primary btn-sm">用户管理</a>
+    </div>
+</div>
+{{if .SecretDefault}}
+<div class="alert alert-warning d-flex align-items-center gap-2 mb-4" role="alert">
+    <span class="small">正在使用内置的默认会话密钥，正式部署请设置 <code>SESSION_SECRET</code> 环境变量（至少 16 位随机串），否则会话签名可被伪造。</span>
+</div>
+{{end}}
+<div class="row g-3">
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-3 p-md-4">
+                <div class="text-muted small mb-1">注册用户</div>
+                <div class="fs-4 fw-bold">{{.Users}}</div>
+                <div class="text-muted small">今日新增 <span class="text-primary fw-semibold">{{.TodayNewUsers}}</span> · 活跃 <span class="text-success fw-semibold">{{.ActiveUsers}}</span></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-3 p-md-4">
+                <div class="text-muted small mb-1">今日签到</div>
+                <div class="fs-4 fw-bold">{{.TodayCheckins}}</div>
+                <div class="text-muted small">人</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-3 p-md-4">
+                <div class="text-muted small mb-1">创作记录</div>
+                <div class="fs-4 fw-bold">{{.Records}}</div>
+                <div class="text-muted small">今日 <span class="text-primary fw-semibold">{{.TodayGens}}</span> 次 · 图片 <span class="text-muted">{{.Images}}</span></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-3 p-md-4">
+                <div class="text-muted small mb-1">兑换码</div>
+                <div class="fs-4 fw-bold">{{.Codes}}</div>
+                <div class="text-muted small">
+                    <span class="text-success">{{.CodesActive}}</span> 可用
+                    <span class="text-secondary">·</span>
+                    <span>{{.CodesUsed}}</span> 已用
+                    <span class="text-secondary">·</span>
+                    <span class="text-danger">{{.CodesVoid}}</span> 作废
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-3 p-md-4">
+                <div class="text-muted small mb-1">积分已发放</div>
+                <div class="fs-4 fw-bold text-success">+{{comma .IssuedPoints}}</div>
+                <div class="text-muted small">注册/签到/兑换</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-3 p-md-4">
+                <div class="text-muted small mb-1">积分已消耗</div>
+                <div class="fs-4 fw-bold text-danger">-{{comma .SpentPoints}}</div>
+                <div class="text-muted small">图片创作消耗</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card app-card mb-4 fade-in-up">
+    <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">近 7 天生成趋势</h6></div>
+    <div class="card-body p-4">
+        <div class="trend-chart">
+            {{range .Trend}}
+            <div class="trend-col" title="{{.Label}}：{{.Count}} 张">
+                <div class="trend-bar" style="height: {{.Height}}%;"><span class="trend-count">{{.Count}}</span></div>
+                <div class="trend-label">{{.Label}}</div>
+            </div>
+            {{end}}
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mt-1">
+    <div class="col-lg-7">
+        <div class="card app-card h-100">
+            <div class="card-header py-3 px-4 d-flex justify-content-between align-items-center">
+                <h6 class="mb-0 fw-bold">最近创作</h6>
+            </div>
+            <div class="card-body p-0">
+                {{if .RecentRecords}}
+                <ul class="activity-list">
+                    {{range .RecentRecords}}
+                    <li>
+                        <div class="flex-grow-1 me-2">
+                            <div class="text-truncate small">{{.Prompt}}</div>
+                            <div class="text-muted small">by {{.Username}}</div>
+                        </div>
+                        <div class="text-end flex-shrink-0">
+                            <div class="cost-badge small">-{{comma .Cost}} 积分</div>
+                            <div class="text-muted small">{{.CreatedAt}}</div>
+                        </div>
+                    </li>
+                    {{end}}
+                </ul>
+                {{else}}
+                <div class="empty-state pt-5 pb-4">
+                    <p class="text-muted mb-0">暂无创作记录</p>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-5">
+        <div class="card app-card h-100">
+            <div class="card-header py-3 px-4 d-flex justify-content-between align-items-center">
+                <h6 class="mb-0 fw-bold">新增用户</h6>
+                <a href="/admin/users" class="small text-primary text-decoration-none">用户管理 →</a>
+            </div>
+            <div class="card-body p-0">
+                {{if .RecentUsers}}
+                <ul class="activity-list">
+                    {{range .RecentUsers}}
+                    <li>
+                        <div class="flex-grow-1 me-2">
+                            <div class="fw-semibold small">{{.Username}}</div>
+                            <div class="text-muted small">{{.CreatedAt}}</div>
+                        </div>
+                        <div class="text-end flex-shrink-0">
+                            <div class="small">{{if eq .Role "admin"}}<span class="badge text-bg-primary">管理员</span>{{else}}<span class="badge text-bg-light">普通用户</span>{{end}}</div>
+                            <div class="points-text small">{{comma .Points}} 积分</div>
+                        </div>
+                    </li>
+                    {{end}}
+                </ul>
+                {{else}}
+                <div class="empty-state pt-5 pb-4">
+                    <p class="text-muted mb-0">暂无用户</p>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

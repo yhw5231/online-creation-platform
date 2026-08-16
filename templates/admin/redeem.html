@@ -1,0 +1,90 @@
+{{define "content-redeem-admin"}}
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+    <h5 class="mb-0 fw-bold">兑换码管理</h5>
+    <form method="POST" action="/admin/redeem-codes/void-old" data-submit="loading">
+        <input type="hidden" name="_csrf" value="{{.CSRF}}">
+        <button type="submit" class="btn btn-outline-warning btn-sm btn-loading" data-loading-text="..." data-confirm="将作废所有 30 天前创建且尚未使用的兑换码，确定继续？">作废 30 天前未使用的</button>
+    </form>
+</div>
+
+<div class="card app-card mb-4 fade-in-up">
+    <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">生成兑换码</h6></div>
+    <div class="card-body p-4">
+        <form method="POST" action="/admin/redeem-codes/generate" class="row g-3" data-submit="loading">
+            <input type="hidden" name="_csrf" value="{{.CSRF}}">
+            <div class="col-md-4">
+                <label class="form-label fw-semibold">单码积分数</label>
+                <input type="number" name="points" class="form-control" value="10" min="1" required>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label fw-semibold">生成数量</label>
+                <input type="number" name="count" class="form-control" value="1" min="1" max="100" required>
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+                <button type="submit" class="btn btn-primary w-100 btn-loading" data-loading-text="生成中...">
+                    <span>生成兑换码</span>
+                </button>
+            </div>
+            <div class="col-12"><span class="text-muted small">每次最多生成 100 个，兑换码由字母和数字组成（不含易混淆字符）。</span></div>
+        </form>
+    </div>
+</div>
+
+<div class="card app-card fade-in-up">
+    <div class="card-body p-0">
+        <div class="p-3 d-flex align-items-center">
+            <form method="GET" action="/admin/redeem-codes" class="d-flex gap-2 flex-grow-1" style="max-width: 380px;">
+                <input type="text" name="q" class="form-control form-control-sm" placeholder="按兑换码搜索..." value="{{.Query}}" autocomplete="off" autofocus>
+                <button type="submit" class="btn btn-primary btn-sm px-3 flex-shrink-0">搜索</button>
+                {{if .Query}}<a href="/admin/redeem-codes" class="btn btn-outline-secondary btn-sm px-3 flex-shrink-0">清除</a>{{end}}
+            </form>
+        </div>
+        {{if gt (len .Codes) 0}}
+        <div class="table-responsive">
+            <table class="table table-hover app-table mb-0">
+                <thead>
+                    <tr><th>ID</th><th>兑换码</th><th>积分</th><th>状态</th><th>使用者</th><th>使用时间</th><th class="text-end">操作</th></tr>
+                </thead>
+                <tbody>
+                    {{range .Codes}}
+                    <tr>
+                        <td class="text-muted">{{.ID}}</td>
+                        <td>
+                            <code class="redeem-code">{{.Code}}</code>
+                            <button type="button" class="btn btn-sm btn-outline-secondary copy-btn ms-1" data-copy="{{.Code}}">复制</button>
+                        </td>
+                        <td><span class="points-text">{{comma .Points}}</span></td>
+                        <td>
+                            {{if eq .Status "active"}}<span class="badge text-bg-success">可用</span>
+                            {{else if eq .Status "used"}}<span class="badge text-bg-secondary">已使用</span>
+                            {{else}}<span class="badge text-bg-danger">已作废</span>{{end}}
+                        </td>
+                        <td>{{if eq .UsedBy 0}}<span class="text-muted">—</span>{{else}}{{.UsedByName}}{{end}}</td>
+                        <td class="text-muted small">{{if .UsedAt}}{{.UsedAt}}{{else}}—{{end}}</td>
+                        <td class="text-end">
+                            {{if eq .Status "active"}}
+                            <form method="POST" action="/admin/redeem-codes/void" class="d-inline" data-submit="loading">
+                                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <button type="submit" class="btn btn-sm btn-outline-danger btn-loading" data-loading-text="..." data-confirm="确定要作废兑换码 “{{.Code}}” 吗？作废后该码将无法兑换。">作废</button>
+                            </form>
+                            {{else}}<span class="text-muted">—</span>{{end}}
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{else}}
+        <div class="empty-state py-5">
+            <div class="empty-state-icon">
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            </div>
+            <p class="mb-1 fs-5 fw-semibold">{{if .Query}}未找到匹配的兑换码{{else}}还没有兑换码{{end}}</p>
+            <p class="text-muted mb-0">{{if .Query}}换个关键词试试，或清除搜索{{else}}使用上方表单生成第一批兑换码{{end}}</p>
+        </div>
+        {{end}}
+        {{template "pagination" .}}
+    </div>
+</div>
+{{end}}

@@ -1,0 +1,60 @@
+{{define "content-register"}}
+<div class="auth-split card app-card fade-in-up overflow-hidden border-0">
+    <div class="auth-split-brand">
+        <div class="auth-logo-lg">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </div>
+        <h2>创建账号</h2>
+        <p>加入 {{.SiteName}}，开启 AI 创作</p>
+        <ul class="auth-features">
+            <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>免费注册，即刻创作</li>
+            <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>新用户有初始积分</li>
+            <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>积分明细透明可查</li>
+        </ul>
+    </div>
+    <div class="auth-split-form">
+        {{if .Error}}<div class="alert alert-danger dismissible-auto" role="alert">{{.Error}}</div>{{end}}
+        <h5 class="fw-bold mb-1">注册新账号</h5>
+        <p class="text-muted small mb-4">只需用户名和密码即可开始</p>
+        <form method="POST" action="/register" data-submit="loading" novalidate>
+            <input type="hidden" name="_csrf" value="{{.CSRF}}">
+            {{if .Next}}<input type="hidden" name="next" value="{{.Next}}">{{end}}
+            <div class="mb-3">
+                <label class="form-label fw-semibold">用户名</label>
+                <input type="text" name="username" class="form-control" placeholder="2-32 个字符" required autofocus autocomplete="username" minlength="2" maxlength="32" value="{{.LastUsername}}">
+            </div>
+            <div class="mb-3">
+                <label class="form-label fw-semibold">密码</label>
+                <div class="input-group">
+                    <input type="password" name="password" id="registerPassword" class="form-control" placeholder="至少 6 位字符" required autocomplete="new-password" minlength="6" data-meter>
+                    <button type="button" class="btn btn-outline-secondary pwd-toggle" data-target="registerPassword" tabindex="-1">显示</button>
+                </div>
+                <div class="pw-meter mt-2" hidden>
+                    <div class="pw-meter-bar"><i class="pw-meter-fill"></i></div>
+                    <div class="pw-meter-text small"></div>
+                </div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label fw-semibold">确认密码</label>
+                <div class="input-group">
+                    <input type="password" name="confirm_password" id="registerConfirm" class="form-control" placeholder="再次输入密码" required autocomplete="new-password">
+                    <button type="button" class="btn btn-outline-secondary pwd-toggle" data-target="registerConfirm" tabindex="-1">显示</button>
+                </div>
+                <div class="form-text d-none text-danger" id="confirmHint">两次输入的密码不一致</div>
+            </div>
+            <div class="mb-4">
+                <label class="form-label fw-semibold">注册码{{if .RequireRegCode}} <span class="text-danger">*</span>{{end}}</label>
+                <input type="text" name="reg_code" class="form-control" placeholder="{{if .RequireRegCode}}请输入管理员发放的注册码{{else}}选填，留空跳过{{end}}" autocomplete="off" {{if .RequireRegCode}}required{{end}}>
+                {{if .RequireRegCode}}<div class="form-text">当前注册需凭邀请码，注册成功后该码作废。</div>{{end}}
+            </div>
+            <button type="submit" class="btn btn-primary w-100 btn-loading" data-loading-text="注册中...">
+                <span>注 册</span>
+            </button>
+        </form>
+        <div class="text-center mt-3">
+            <span class="text-muted">已有账号？</span>
+            <a href="/login" class="fw-semibold text-primary">返回登录</a>
+        </div>
+    </div>
+</div>
+{{end}}

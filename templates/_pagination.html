@@ -1,0 +1,33 @@
+{{define "pagination"}}
+{{if gt .TotalPages 1}}
+<div class="d-flex justify-content-center py-3 border-top">
+    <ul class="pagination app-pagination mb-0">
+        <li class="page-item {{if not .HasPrev}}disabled{{end}}">
+            <a class="page-link" href="{{.PageBase}}page={{.PrevPage}}">上一页</a>
+        </li>
+        {{range $p := pages $.Page $.TotalPages}}
+        {{if eq $p 0}}
+        <li class="page-item disabled"><span class="page-link">…</span></li>
+        {{else}}
+        <li class="page-item {{if eq $p $.Page}}active{{end}}">
+            <a class="page-link" href="{{$.PageBase}}page={{$p}}">{{$p}}</a>
+        </li>
+        {{end}}
+        {{end}}
+        <li class="page-item {{if not .HasNext}}disabled{{end}}">
+            <a class="page-link" href="{{.PageBase}}page={{.NextPage}}">下一页</a>
+        </li>
+    </ul>
+</div>
+<div class="d-flex align-items-center justify-content-center gap-2 text-muted small pb-2 flex-wrap">
+    <span>共 {{.Total}} 条记录</span>
+    <span class="text-secondary">·</span>
+    <form method="GET" action="{{.PageBase}}" class="d-flex align-items-center gap-1" data-pagejump>
+        <label class="form-label mb-0 me-1" for="pj">跳至</label>
+        <input type="number" id="pj" name="page" min="1" max="{{.TotalPages}}" class="form-control form-control-sm" style="width:64px" value="{{.Page}}">
+        <span>/ {{.TotalPages}} 页</span>
+        <button type="submit" class="btn btn-sm btn-outline-primary flex-shrink-0">go</button>
+    </form>
+</div>
+{{end}}
+{{end}}

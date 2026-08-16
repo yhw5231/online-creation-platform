@@ -1,0 +1,87 @@
+{{define "content-checkin"}}
+<div class="row justify-content-center">
+    <div class="col-md-8 col-lg-7">
+        <div class="card app-card fade-in-up">
+            <div class="card-header py-3 px-4">
+                <h5 class="mb-0 fw-bold">每日签到</h5>
+            </div>
+            <div class="card-body p-4">
+                {{if .Error}}<div class="alert alert-danger dismissible-auto mb-4" role="alert">{{.Error}}</div>{{end}}
+                {{if .CheckedIn}}
+                <div class="text-center mb-4">
+                    {{if .CheckinPoints}}
+                    <div class="alert alert-success mb-3">今日签到成功，获得 <strong>{{.CheckinPoints}}</strong> 积分</div>
+                    {{else}}
+                    <div class="alert alert-success mb-3">今日已签到，明天再来吧</div>
+                    {{end}}
+                </div>
+                {{else if eq .CheckinEnabled "false"}}
+                <div class="alert alert-info mb-4">签到功能暂未开启，敬请期待。</div>
+                {{else}}
+                <form method="POST" action="/checkin" data-submit="loading" class="text-center mb-3">
+                    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+                    <button type="submit" class="btn btn-success btn-lg px-5 btn-loading" data-loading-text="签到中...">
+                        <span>立即签到</span>
+                    </button>
+                </form>
+                {{if .ExpectedPoint}}<p class="text-center text-muted small mb-4">今日签到可得：{{.ExpectedPoint}}</p>{{end}}
+                {{end}}
+
+                <div class="row g-3 mb-4 text-center">
+                    <div class="col-6">
+                        <div class="p-3 checkin-stat">
+                            <div class="text-muted small mb-1">当前连续签到</div>
+                            <div class="fs-4 fw-bold text-success">{{.Streak}} 天</div>
+                        </div>
+                    </div>
+                    <div class="col-6">
+                        <div class="p-3 checkin-stat">
+                            <div class="text-muted small mb-1">累计签到</div>
+                            <div class="fs-4 fw-bold">{{.TotalCheckins}} 天</div>
+                        </div>
+                    </div>
+                </div>
+
+                {{if .Days}}
+                <label class="form-label fw-semibold">最近 30 天签到记录</label>
+                <div class="checkin-week" aria-hidden="true">
+                    <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+                </div>
+                <div class="checkin-grid mb-3">
+                    {{range .Days}}
+                    <div class="checkin-cell{{if .Checked}} checked{{end}}{{if .Today}} today{{end}}" title="{{.Date}} {{if .Checked}}已签到{{else}}未签到{{end}}" data-bs-toggle="tooltip">
+                        <div class="cell-day">{{.Day}}</div>
+                        {{if .Checked}}<div class="cell-ok">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        </div>{{end}}
+                    </div>
+                    {{end}}
+                </div>
+                <div class="d-flex flex-wrap gap-4 small text-muted mb-4">
+                    <span><span class="legend-swatch checked" aria-hidden="true"></span>已签到</span>
+                    <span><span class="legend-swatch" aria-hidden="true"></span>未签到</span>
+                    <span><span class="legend-swatch today" aria-hidden="true"></span>今天</span>
+                </div>
+                {{end}}
+
+                {{if .History}}
+                <hr>
+                <h6 class="fw-bold mb-3">最近签到记录</h6>
+                <div class="table-responsive">
+                    <table class="table app-table mb-0">
+                        <tbody>
+                            {{range .History}}
+                            <tr>
+                                <td class="ps-0 text-muted small">{{.Date}}</td>
+                                <td class="text-end text-success fw-semibold">+{{.Points}} 积分</td>
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

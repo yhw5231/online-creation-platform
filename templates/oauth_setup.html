@@ -1,0 +1,60 @@
+{{define "content-oauth-setup"}}
+<div class="auth-split card app-card fade-in-up overflow-hidden border-0">
+    <div class="auth-split-brand">
+        <div class="auth-logo-lg">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </div>
+        <h2>完成注册</h2>
+        <p>使用 Linux.do 账号注册，还需设置用户名和密码</p>
+        <ul class="auth-features">
+            <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>绑定后可用 Linux.do 一键登录</li>
+            <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>设置密码后可独立登录</li>
+        </ul>
+    </div>
+    <div class="auth-split-form">
+        {{if .Error}}<div class="alert alert-danger dismissible-auto" role="alert">{{.Error}}</div>{{end}}
+        <h5 class="fw-bold mb-1">完善账号信息</h5>
+        <p class="text-muted small mb-4">用户名将作为平台账号，密码用于账号密码登录</p>
+        <form method="POST" action="/auth/linuxdo/setup" data-submit="loading" novalidate>
+            <input type="hidden" name="_csrf" value="{{.CSRF}}">
+            <div class="mb-3">
+                <label class="form-label fw-semibold">用户名</label>
+                <input type="text" name="username" class="form-control" placeholder="2-32 个字符" required autofocus autocomplete="username" minlength="2" maxlength="32" value="{{.OAuthUsername}}">
+                <div class="form-text">已预填 Linux.do 用户名，可自行修改（需唯一）。</div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label fw-semibold">密码</label>
+                <div class="input-group">
+                    <input type="password" name="password" id="setupPassword" class="form-control" placeholder="至少 6 位字符" required autocomplete="new-password" minlength="6" data-meter>
+                    <button type="button" class="btn btn-outline-secondary pwd-toggle" data-target="setupPassword" tabindex="-1">显示</button>
+                </div>
+                <div class="pw-meter mt-2" hidden>
+                    <div class="pw-meter-bar"><i class="pw-meter-fill"></i></div>
+                    <div class="pw-meter-text small"></div>
+                </div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label fw-semibold">确认密码</label>
+                <div class="input-group">
+                    <input type="password" name="confirm_password" id="setupConfirm" class="form-control" placeholder="再次输入密码" required autocomplete="new-password">
+                    <button type="button" class="btn btn-outline-secondary pwd-toggle" data-target="setupConfirm" tabindex="-1">显示</button>
+                </div>
+            </div>
+            {{if .RequireRegCode}}
+            <div class="mb-4">
+                <label class="form-label fw-semibold">注册码 <span class="text-danger">*</span></label>
+                <input type="text" name="reg_code" class="form-control" placeholder="请输入管理员发放的注册码" autocomplete="off" required>
+                <div class="form-text">当前注册需凭邀请码，注册成功后该码作废。</div>
+            </div>
+            {{end}}
+            <button type="submit" class="btn btn-primary w-100 btn-loading" data-loading-text="注册中...">
+                <span>完成注册</span>
+            </button>
+        </form>
+        <div class="text-center mt-3">
+            <span class="text-muted">已有账号？</span>
+            <a href="/login" class="fw-semibold text-primary">返回登录</a>
+        </div>
+    </div>
+</div>
+{{end}}

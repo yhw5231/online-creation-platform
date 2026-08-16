@@ -1,0 +1,29 @@
+{{define "content-notices"}}
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        <div class="card app-card mb-4 fade-in-up">
+            <div class="card-header py-3 px-4 d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <div>
+                    <h5 class="mb-0 fw-bold">平台公告</h5>
+                    <span class="text-muted small">这里记录平台的所有公告历史，重要通知不再错过</span>
+                </div>
+                <a href="/" class="btn btn-sm btn-outline-secondary">返回首页</a>
+            </div>
+            <div class="card-body p-4">
+                {{if .Notices}}
+                {{range .Notices}}
+                <article class="notice-item mb-4 pb-4">
+                    {{if .Title}}<h5 class="fw-bold mb-1">{{.Title}}</h5>{{end}}
+                    <div class="text-muted small mb-2">发布于 {{.CreatedAt}}</div>
+                    <div class="notice-content text-pre-wrap">{{.Content}}</div>
+                    <hr>
+                </article>
+                {{end}}
+                {{else}}
+                <div class="text-center text-muted py-5">暂无公告</div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

@@ -1,0 +1,9 @@
+.git
+.gocache
+.gopath
+app.exe
+docs
+Dockerfile
+docker-compose.yml
+.gitignore
+README.md

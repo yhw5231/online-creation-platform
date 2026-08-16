@@ -1,0 +1,93 @@
+{{define "content-points"}}
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+    <div>
+        <h5 class="mb-0 fw-bold">积分明细</h5>
+        <span class="text-muted small">{{if .Total}}共 {{.Total}} 条记录{{else}}暂无记录{{end}}，每次显示 20 条</span>
+    </div>
+    <span class="points-badge" title="当前积分">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 1a11 11 0 1 0 11 11A11 11 0 0 0 12 1zm0 19a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm1-13h-2v3H8v2h3v3h2v-3h3v-2h-3z"/></svg>
+        {{comma .Points}} 积分
+    </span>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-4 text-center">
+                <div class="text-muted small mb-1">累计获得</div>
+                <div class="fs-4 fw-bold text-success">+{{comma .TotalGot}}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-4 text-center">
+                <div class="text-muted small mb-1">累计消耗</div>
+                <div class="fs-4 fw-bold text-danger">-{{comma .TotalUsed}}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-4 text-center">
+                <div class="text-muted small mb-1">净获得</div>
+                <div class="fs-4 fw-bold {{if lt .NetGain 0}}text-danger{{else if gt .NetGain 0}}text-success{{end}}">{{if gt .NetGain 0}}+{{end}}{{if eq .NetGain 0}}0{{else}}{{comma .NetGain}}{{end}}</div>
+                <div class="text-muted small mt-1">获得 - 消耗</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card app-card">
+            <div class="card-body p-4 text-center">
+                <div class="text-muted small mb-1">当前余额</div>
+                <div class="fs-4 fw-bold points-text">{{comma .Points}}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="account-meta d-flex flex-wrap gap-2 gap-md-3 text-muted small mb-4">
+        <span>加入于 <strong class="text-body">{{.UserSince}}</strong></span>
+        <span class="text-secondary">·</span>
+        <span>累计签到 <strong class="text-body">{{.CheckinCount}}</strong> 天</span>
+        <span class="text-secondary">·</span>
+        <span>累计创作 <strong class="text-body">{{.RecordCount}}</strong> 张</span>
+    </div>
+
+    <div class="card app-card fade-in-up">
+    <div class="card-body p-0">
+        {{if gt (len .Log) 0}}
+        <div class="table-responsive">
+            <table class="table table-hover app-table mb-0">
+                <thead>
+                    <tr><th>变动</th><th>说明</th><th>余额</th><th>时间</th></tr>
+                </thead>
+                <tbody>
+                    {{range .Log}}
+                    <tr>
+                        <td>{{if gt .Delta 0}}<span class="text-success fw-semibold">+{{.Delta}}</span>{{else}}<span class="text-danger fw-semibold">{{.Delta}}</span>{{end}}</td>
+                        <td>{{.Desc}}</td>
+                        <td><span class="points-text">{{comma .Balance}}</span></td>
+                        <td class="text-muted small">{{.CreatedAt}}</td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{else}}
+        <div class="empty-state py-5">
+            <div class="empty-state-icon">
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
+            </div>
+            <p class="mb-1 fs-5 fw-semibold">暂无积分变动记录</p>
+            <p class="text-muted mb-3">去签到或兑换，开始积累积分吧</p>
+            <div class="d-flex gap-2">
+                <a href="/checkin" class="btn btn-primary">每日签到</a>
+                <a href="/redeem" class="btn btn-outline-primary">兑换积分</a>
+            </div>
+        </div>
+        {{end}}
+        {{template "pagination" .}}
+    </div>
+</div>
+{{end}}

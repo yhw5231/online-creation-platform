@@ -1,0 +1,11 @@
+{{define "content-404"}}
+<div class="error-wrap">
+    <div class="error-code">{{.ErrorCode}}</div>
+    <p class="fs-5 fw-semibold mb-2">{{.ErrorMessage}}</p>
+    <p class="text-muted mb-2">如有疑问，请返回首页或联系管理员</p>
+    <div class="d-flex gap-2 mt-3">
+        <a href="/" class="btn btn-primary px-4">返回首页</a>
+        {{if .IsLoggedIn}}<a href="/create" class="btn btn-outline-secondary px-4">去创作</a>{{end}}
+    </div>
+</div>
+{{end}}

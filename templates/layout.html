@@ -1,0 +1,176 @@
+{{define "layout.html"}}
+<!DOCTYPE html>
+<html lang="zh-CN">
+{{template "head" .}}
+<body data-toast="{{.Toast}}">
+    {{template "nav" .}}
+    {{if .SiteNotice}}
+    <div class="site-notice" id="siteNotice" role="note">
+        <div class="container d-flex align-items-center justify-content-between gap-2 py-1">
+            <span class="small py-1">{{.SiteNotice}}</span>
+            <button type="button" class="btn-close btn-close-white flex-shrink-0" data-dismiss-notice aria-label="关闭公告" style="--bs-btn-close-color:#4b5563;"></button>
+        </div>
+    </div>
+    {{end}}
+    <main class="container app-main py-4">
+        {{if eq .Content "content-home"}}{{template "content-home" .}}
+        {{else if eq .Content "content-login"}}{{template "content-login" .}}
+        {{else if eq .Content "content-register"}}{{template "content-register" .}}
+        {{else if eq .Content "content-oauth-setup"}}{{template "content-oauth-setup" .}}
+        {{else if eq .Content "content-create"}}{{template "content-create" .}}
+        {{else if eq .Content "content-records"}}{{template "content-records" .}}
+        {{else if eq .Content "content-redeem"}}{{template "content-redeem" .}}
+        {{else if eq .Content "content-checkin"}}{{template "content-checkin" .}}
+        {{else if eq .Content "content-users"}}{{template "content-users" .}}
+        {{else if eq .Content "content-dashboard"}}{{template "content-dashboard" .}}
+        {{else if eq .Content "content-settings"}}{{template "content-settings" .}}
+        {{else if eq .Content "content-redeem-admin"}}{{template "content-redeem-admin" .}}
+        {{else if eq .Content "content-points"}}{{template "content-points" .}}
+        {{else if eq .Content "content-password"}}{{template "content-password" .}}
+        {{else if eq .Content "content-profile"}}{{template "content-profile" .}}
+        {{else if eq .Content "content-leaderboard"}}{{template "content-leaderboard" .}}
+        {{else if eq .Content "content-rules"}}{{template "content-rules" .}}
+        {{else if eq .Content "content-notices"}}{{template "content-notices" .}}
+        {{else if eq .Content "content-admin-notices"}}{{template "content-admin-notices" .}}
+        {{else if eq .Content "content-api-docs"}}{{template "content-api-docs" .}}
+        {{else if eq .Content "content-404"}}{{template "content-404" .}}
+        {{end}}
+    </main>
+    <footer class="app-footer">
+        <div class="container d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <span>{{.SiteName}} · AI 图片创作平台</span>
+            <span class="text-muted">积分制 · 每日签到 · 创作自动扣分</span>
+        </div>
+        <div class="container app-footer-sub d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <span class="text-muted small">© 2026 {{.SiteName}} · 保留所有权利</span>
+            <span class="d-flex gap-3 small">
+                <a class="text-muted text-decoration-none" href="/">首页</a>
+                <a class="text-muted text-decoration-none" href="/create">创意生成</a>
+                <a class="text-muted text-decoration-none" href="/checkin">每日签到</a>
+                <a class="text-muted text-decoration-none" href="/redeem">积分兑换</a>
+                <a class="text-muted text-decoration-none" href="/leaderboard">排行榜</a>
+                <a class="text-muted text-decoration-none" href="/notices">公告</a>
+                <a class="text-muted text-decoration-none" href="/rules">积分规则</a>
+            </span>
+        </div>
+    </footer>
+
+    <div class="modal fade" id="imageModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-centered">
+            <div class="modal-content app-image-modal">
+                <div class="modal-body p-0 text-center">
+                    <img id="imageModalImg" src="" alt="图片预览" class="w-100">
+                </div>
+                <div class="modal-footer d-flex justify-content-center py-2">
+                    <a id="imageModalDownload" class="btn btn-primary btn-sm" href="#" download>下载原图</a>
+                </div>
+                <button type="button" class="btn-close position-absolute top-0 end-0 m-3 bg-white p-2 rounded-circle" data-bs-dismiss="modal" aria-label="关闭" style="opacity:.9;z-index:5;"></button>
+            </div>
+        </div>
+    </div>
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
+    <button id="backTop" class="btn back-top" type="button" aria-label="回到顶部" title="回到顶部">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+    </button>
+
+    {{template "scripts" .}}
+</body>
+</html>
+{{end}}
+
+{{define "head"}}
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#6366f1">
+    <title>{{if .Title}}{{.Title}} · {{end}}{{.SiteName}}</title>
+    <meta name="description" content="{{.SiteName}} —— AI 图片创作平台，积分签到、兑换码、多模型文生图。">
+    <meta property="og:site_name" content="{{.SiteName}}">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="{{if .Title}}{{.Title}} · {{end}}{{.SiteName}}">
+    <meta property="og:description" content="{{.SiteName}} —— AI 图片创作平台。">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/css/style.css?v=76" rel="stylesheet">
+</head>
+{{end}}
+
+{{define "nav"}}
+<nav class="navbar navbar-expand-lg app-navbar sticky-top">
+    <div class="container">
+        <a class="navbar-brand" href="/">
+            <span class="brand-logo">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>
+            </span>
+            <span>{{.SiteName}}</span>
+        </a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMenu" aria-controls="navMenu" aria-expanded="false" aria-label="切换导航">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navMenu">
+            {{if .IsLoggedIn}}
+            <ul class="navbar-nav me-auto align-items-lg-center">
+                <li class="nav-item"><a class="nav-link" data-nav="/create" href="/create">创意生成</a></li>
+                <li class="nav-item"><a class="nav-link" data-nav="/records" href="/records">创作记录</a></li>
+                <li class="nav-item"><a class="nav-link" data-nav="/redeem" href="/redeem">积分兑换</a></li>
+                <li class="nav-item"><a class="nav-link" data-nav="/checkin" href="/checkin">每日签到{{if .CheckinAvailable}}<span class="nav-dot" title="今日可签到"></span>{{end}}</a></li>
+                <li class="nav-item"><a class="nav-link" data-nav="/leaderboard" href="/leaderboard">排行榜</a></li>
+                {{if .IsAdmin}}
+                <li class="nav-item dropdown">
+                    <a class="nav-link dropdown-toggle" data-nav="/admin" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">管理后台</a>
+                    <ul class="dropdown-menu dropdown-menu-lg-end shadow">
+                        <li><a class="dropdown-item" href="/admin">数据概览</a></li>
+                        <li><a class="dropdown-item" href="/admin/users">用户管理</a></li>
+                        <li><a class="dropdown-item" href="/admin/redeem-codes">兑换码管理</a></li>
+                        <li><a class="dropdown-item" href="/admin/notices">公告管理</a></li>
+                        <li><a class="dropdown-item" href="/admin/settings">系统设置</a></li>
+                    </ul>
+                </li>
+                {{end}}
+            </ul>
+            <div class="user-area d-flex align-items-center flex-wrap">
+                <a class="points-badge" href="/points" title="点击查看积分明细">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 1a11 11 0 1 0 11 11A11 11 0 0 0 12 1zm0 19a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm1-13h-2v3H8v2h3v3h2v-3h3v-2h-3z"/></svg>
+                    {{comma .Points}} 积分
+                </a>
+                <div class="dropdown">
+                    <button class="btn user-menu-toggle dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                        <span class="avatar-circle">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-3.33 0-10 1.67-10 5v1h20v-1c0-3.33-6.67-5-10-5z"/></svg>
+                        </span>
+                        <span class="user-name">{{.Username}}</span>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end shadow">
+                        <li><span class="dropdown-item-text text-muted small">{{.Username}} 的账户</span></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="/profile">个人主页</a></li>
+                        <li><a class="dropdown-item" href="/points">积分明细</a></li>
+                        <li><a class="dropdown-item" href="/password">修改密码</a></li>
+                        {{if .IsAdmin}}
+                        <li><a class="dropdown-item" href="/admin/settings">系统设置</a></li>
+                        {{end}}
+                        <li><hr class="dropdown-divider"></li>
+                        <li>
+                            <form method="POST" action="/logout" data-submit="loading">
+                                <input type="hidden" name="_csrf" value="{{.CSRF}}">
+                                <button type="submit" class="dropdown-item text-danger btn-logout-form btn-loading" data-loading-text="退出中..." data-confirm="确定要退出登录吗？">退出登录</button>
+                            </form>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+            {{else}}
+            <div class="ms-auto d-flex gap-2">
+                <a href="/login" class="btn btn-sm btn-login">登录</a>
+                <a href="/register" class="btn btn-sm btn-register">注册</a>
+            </div>
+            {{end}}
+        </div>
+    </div>
+</nav>
+{{end}}
+
+{{define "scripts"}}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/js/app.js?v=111"></script>
+{{end}}
