@@ -261,6 +261,11 @@
                     <input name="storage_bucket" class="form-control" value="{{.Settings.storage_bucket}}" placeholder="my-bucket">
                 </div>
                 <div class="col-md-4">
+                    <label class="form-label fw-semibold">Region（S3）</label>
+                    <input name="storage_region" class="form-control" value="{{.Settings.storage_region}}" placeholder="us-east-1">
+                    <div class="form-text">S3 签名所用区域（如 us-east-1 / ap-northeast-1 / oss-cn-hangzhou），默认 us-east-1。</div>
+                </div>
+                <div class="col-md-4">
                     <label class="form-label fw-semibold">用户名 / AccessKey</label>
                     <input name="storage_username" class="form-control" value="{{.Settings.storage_username}}" placeholder="S3: AccessKey ID；WebDAV: 用户名；POST: 留空">
                 </div>

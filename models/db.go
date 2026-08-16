@@ -178,6 +178,7 @@ var defaultConfigs = map[string]string{
 	"storage_type":            "", // none / s3 / webdav / post
 	"storage_endpoint":        "",
 	"storage_bucket":          "",
+	"storage_region":          "us-east-1",
 	"storage_username":        "",
 	"storage_password":        "",
 	"storage_path_prefix":     "",

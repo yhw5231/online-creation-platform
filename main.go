@@ -33,16 +33,32 @@ import (
 )
 
 var (
-	store      = sessions.NewCookieStore(sessionKey())
-	tpl        *template.Template
-	grokClient *services.GrokClient
+	store = sessions.NewCookieStore(sessionKey())
+	tpl   *template.Template
 	// uploader 按后台"存储设置"构造的外部长期存储上传器（s3/webdav/post）；
 	// 未配置时为 nil，图片只存服务器本地。
-	uploader services.Uploader
+	// 注意：设置保存/重置（HTTP 请求线程）与生成 worker（后台线程）会并发
+	// 读写该全局变量，必须经 uploaderMu 保护（接口值为两个字，非原子读）。
+	uploaderMu sync.RWMutex
+	uploader   services.Uploader
 	// taskQueue 接收新提交的生成任务（记录 ID），由后台 worker 依次消费，
 	// 使"开始创作"立即返回，生成过程异步进行、前端轮询同步状态。
 	taskQueue = make(chan genTask, 256)
 )
+
+// getUploader 并发安全地读取当前外部存储上传器（可能为 nil）。
+func getUploader() services.Uploader {
+	uploaderMu.RLock()
+	defer uploaderMu.RUnlock()
+	return uploader
+}
+
+// setUploader 并发安全地替换外部存储上传器（设置保存/重置后调用）。
+func setUploader(u services.Uploader) {
+	uploaderMu.Lock()
+	uploader = u
+	uploaderMu.Unlock()
+}
 
 // genTask 是异步生成队列中的一个待处理任务。
 type genTask struct {
@@ -263,11 +279,8 @@ func main() {
 	}).ParseGlob("templates/*.html"))
 	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
 
-	apiURL, _ := models.GetConfig("generation_api_url")
-	apiKey, _ := models.GetConfig("generation_api_key")
-	if apiURL != "" && apiKey != "" {
-		grokClient = services.NewGrokClient(apiURL, apiKey)
-	} else {
+	// 多接口渠道在生成时按需读取（loadEndpoints），无需全局缓存客户端
+	if url, _ := models.GetConfig("generation_api_url"); url == "" {
 		log.Println("Warning: generation_api_url or key not set")
 	}
 
@@ -277,8 +290,9 @@ func main() {
 	recoverPendingTasks()
 
 	// 初始化外部长期存储上传器（s3/webdav/post），未配置时为 nil
-	uploader = loadStorageUploader()
-	if uploader != nil {
+	u0 := loadStorageUploader()
+	setUploader(u0)
+	if u0 != nil {
 		log.Println("Storage uploader enabled:", storageTypeOf())
 	}
 	// 启动自动清理任务：按保留天数 + 按磁盘上限（受后台设置控制）
@@ -1695,15 +1709,21 @@ func recentTasks(userID int64, limit int) []map[string]interface{} {
 // recordImagePaths lists every archived image path of a record.
 func recordImagePaths(recordID int64) []string {
 	var paths []string
-	rows, err := models.DB.Query("SELECT path FROM generation_images WHERE record_id=? ORDER BY idx", recordID)
+	rows, err := models.DB.Query("SELECT path, storage_path FROM generation_images WHERE record_id=? ORDER BY idx", recordID)
 	if err != nil {
 		return paths
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var p string
-		if rows.Scan(&p) == nil && p != "" {
-			paths = append(paths, p)
+		var p, sp string
+		if rows.Scan(&p, &sp) == nil {
+			if p != "" {
+				paths = append(paths, p)
+			} else if sp != "" {
+				// 本地文件已清理但有外部存储备份：用备用地址，
+				// 与 records / apiStatus 的回退行为保持一致。
+				paths = append(paths, sp)
+			}
 		}
 	}
 	return paths
@@ -1829,10 +1849,12 @@ func processGeneration(recordID int64) {
 				imageURL = saved
 			}
 			// 外部存储上传（失败仅告警，不影响本地归档）
-			if uploader != nil {
-				if result, uerr := uploader.Upload("data"+saved, strings.TrimPrefix(saved, "/images/")); uerr == nil {
+			// 注意：storage_path 落库的是完整可访问地址（result.URL），
+			// S3/POST 模式绝不能存相对 Ref（前端备用下载/图片回退会 404）。
+			if up := getUploader(); up != nil {
+				if result, uerr := up.Upload("data"+saved, strings.TrimPrefix(saved, "/images/")); uerr == nil {
 					storageType = storageTypeOf()
-					storageRefByID[i] = result.Ref
+					storageRefByID[i] = result.URL
 					log.Printf("image %s uploaded to storage ref=%s url=%s", saved, result.Ref, result.URL)
 				} else {
 					log.Printf("storage upload failed for %s: %v", saved, uerr)
@@ -2214,14 +2236,19 @@ func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	userID, _, _ := currentUser(r)
 	id := r.FormValue("id")
-	// 先收集该记录的全部归档图片路径，再删除，避免残留文件
-	var paths []string
-	rowsP, _ := models.DB.Query("SELECT path FROM generation_images WHERE record_id=?", id)
+	// 先收集该记录的全部归档图片路径与外部存储地址，再删除，避免残留文件/对象
+	var paths, remoteRefs []string
+	rowsP, _ := models.DB.Query("SELECT path, storage_path FROM generation_images WHERE record_id=?", id)
 	if rowsP != nil {
 		for rowsP.Next() {
-			var p string
-			if rowsP.Scan(&p) == nil {
-				paths = append(paths, p)
+			var p, sp string
+			if rowsP.Scan(&p, &sp) == nil {
+				if p != "" {
+					paths = append(paths, p)
+				}
+				if sp != "" {
+					remoteRefs = append(remoteRefs, sp)
+				}
 			}
 		}
 		rowsP.Close()
@@ -2239,6 +2266,15 @@ func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	for _, p := range paths {
 		if strings.HasPrefix(p, "/images/") {
 			os.Remove("data" + p)
+		}
+	}
+	// 同步删除外部存储对象（尽力而为：失败仅告警，不阻塞用户操作，
+	// POST 上传类型不支持远端删除时自然跳过）
+	if deleter, ok := getUploader().(services.RemoteDeleter); ok {
+		for _, ref := range remoteRefs {
+			if err := deleter.Delete(ref); err != nil {
+				log.Printf("remote delete failed for %s: %v", ref, err)
+			}
 		}
 	}
 	// 返回来源页，尽量保留分页与搜索条件
@@ -2993,16 +3029,8 @@ func adminUpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	// 多接口渠道列表：ep_name[]/ep_url[]/ep_key[]/ep_model[]/ep_nsfw[]/ep_res[]
 	// 解析为 JSON 存入 generation_endpoints，并回写旧字段保持兼容
 	saveEndpointsFromForm(r)
-	// 按最新存储设置重建上传器
-	uploader = loadStorageUploader()
-	apiURL, _ := models.GetConfig("generation_api_url")
-	apiKey, _ := models.GetConfig("generation_api_key")
-	if apiURL != "" && apiKey != "" {
-		grokClient = services.NewGrokClient(apiURL, apiKey)
-	} else {
-		// 清空任一配置即停用生成服务（generate 处有 nil 防护）
-		grokClient = nil
-	}
+	// 按最新存储设置重建上传器（并发安全：worker 线程可能正在读取）
+	setUploader(loadStorageUploader())
 	flashRedirect(w, r, "/admin/settings", "设置已保存")
 }
 
@@ -3096,13 +3124,13 @@ func adminResetSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "重置失败，请重试", http.StatusInternalServerError)
 		return
 	}
-	// 重置后按新配置重建外部依赖（API / OAuth 客户端）
-	apiURL, _ := models.GetConfig("generation_api_url")
-	apiKey, _ := models.GetConfig("generation_api_key")
-	if apiURL != "" && apiKey != "" {
-		grokClient = services.NewGrokClient(apiURL, apiKey)
-	} else {
-		grokClient = nil
+	// 重置后按新配置重建外部依赖（生成渠道按需读取 / 外部存储上传器）
+	// 设置已重置为默认（storage_type 为空），必须同步重建/关闭上传器，
+	// 否则重置后新生成的图片仍会继续上传旧的已关闭外部存储。
+	u2 := loadStorageUploader()
+	setUploader(u2)
+	if u2 != nil {
+		log.Println("Storage uploader enabled after reset:", storageTypeOf())
 	}
 	flashRedirect(w, r, "/admin/settings", "已恢复默认设置")
 }
@@ -3193,6 +3221,7 @@ func loadStorageUploader() services.Uploader {
 	}
 	endpoint, _ := models.GetConfig("storage_endpoint")
 	bucket, _ := models.GetConfig("storage_bucket")
+	region, _ := models.GetConfig("storage_region")
 	user, _ := models.GetConfig("storage_username")
 	pass, _ := models.GetConfig("storage_password")
 	prefix, _ := models.GetConfig("storage_path_prefix")
@@ -3200,6 +3229,7 @@ func loadStorageUploader() services.Uploader {
 		Type:       t,
 		Endpoint:   endpoint,
 		Bucket:     bucket,
+		Region:     region,
 		Username:   user,
 		Password:   pass,
 		PathPrefix: prefix,
@@ -3950,12 +3980,18 @@ func apiStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var images []string
 	if statusStr == "success" {
-		rows, _ := models.DB.Query("SELECT path FROM generation_images WHERE record_id=? ORDER BY idx", id)
+		rows, _ := models.DB.Query("SELECT path, storage_path FROM generation_images WHERE record_id=? ORDER BY idx", id)
 		defer rows.Close()
 		for rows.Next() {
-			var p string
-			if rows.Scan(&p) == nil {
-				images = append(images, p)
+			var p, sp string
+			if rows.Scan(&p, &sp) == nil {
+				if p != "" {
+					images = append(images, p)
+				} else if sp != "" {
+					// 本地文件已清理但有外部存储备份：以备用地址返回，
+					// 与 Web 端 records 页的回退行为保持一致。
+					images = append(images, sp)
+				}
 			}
 		}
 	}
