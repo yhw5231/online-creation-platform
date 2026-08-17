@@ -562,6 +562,11 @@ a.link-primary { color: var(--primary); }
   font-weight: 700;
   letter-spacing: .08em;
   font-size: .95rem;
+  display: inline-block;
+  max-width: 100%;
+  word-break: break-all;
+  white-space: normal;
+  vertical-align: middle;
 }
 
 /* ---------- Modal ---------- */

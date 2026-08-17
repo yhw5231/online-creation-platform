@@ -4142,10 +4142,12 @@ func adminVoidOldCodesHandler(w http.ResponseWriter, r *http.Request) {
 	flashRedirect(w, r, "/admin/redeem-codes", fmt.Sprintf("已作废 %d 个 30 天前创建且未使用的兑换码", n))
 }
 
+// generateRedeemCode 生成 32 位兑换/注册码：大写字母 + 数字（不含易混淆的
+// 0/O/1/I/L），供积分兑换码与注册码共用。
 func generateRedeemCode() string {
 	const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	b := make([]byte, 8)
-	bb := make([]byte, 8)
+	b := make([]byte, 32)
+	bb := make([]byte, 32)
 	if _, err := rand.Read(bb); err == nil {
 		for i := range b {
 			b[i] = chars[int(bb[i])%len(chars)]

@@ -110,8 +110,8 @@ func TestGenerateRedeemCode(t *testing.T) {
 	const allowed = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	for i := 0; i < 50; i++ {
 		code := generateRedeemCode()
-		if len(code) != 8 {
-			t.Fatalf("redeem code length = %d, want 8", len(code))
+		if len(code) != 32 {
+			t.Fatalf("redeem code length = %d, want 32", len(code))
 		}
 		for _, c := range code {
 			if !strings.ContainsRune(allowed, c) {
