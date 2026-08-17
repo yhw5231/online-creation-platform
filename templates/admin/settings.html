@@ -9,7 +9,7 @@
         <button type="submit" class="btn btn-outline-danger btn-sm btn-loading" data-loading-text="..." data-confirm="确定恢复默认设置？站点名称、积分规则等将全部回归默认值，请谨慎操作。">恢复默认设置</button>
     </form>
 </div>
-<form method="POST" action="/admin/update-settings" data-submit="loading">
+<form method="POST" action="/admin/update-settings" data-submit="loading" autocomplete="off">
     <input type="hidden" name="_csrf" value="{{.CSRF}}">
     <div class="card app-card mb-4 fade-in-up">
         <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">基本信息</h6></div>
@@ -92,7 +92,7 @@
     <div class="card app-card mb-4 fade-in-up">
         <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">图片生成接口（多渠道）</h6></div>
         <div class="card-body p-4">
-            <p class="text-muted small mb-3">支持配置多个生成接口渠道。生成时默认使用<strong>普通渠道</strong>；用户开启 NSFW 后使用<strong>NSFW 渠道</strong>。API Key 留空表示保留已保存的密钥，地址为空的行会被忽略。</p>
+            <p class="text-muted small mb-3">支持配置多个生成接口渠道，可留空不填。生成时默认使用<strong>普通渠道</strong>；用户开启 NSFW 后使用<strong>NSFW 渠道</strong>。API Key 留空表示保留已保存的密钥，地址为空的行会被忽略；全部留空则停用图片生成。</p>
             <div id="endpointRows">
                 {{if .Endpoints}}
                 {{range $i, $ep := .Endpoints}}
@@ -104,11 +104,11 @@
                         </div>
                         <div class="col-md-3">
                             <label class="form-label fw-semibold">API 地址</label>
-                            <input name="ep_url[]" class="form-control" value="{{$ep.APIURL}}" placeholder="https://grok.example.com/v1" required>
+                            <input name="ep_url[]" class="form-control" value="{{$ep.APIURL}}" placeholder="https://grok.example.com/v1">
                         </div>
                         <div class="col-md-3">
                             <label class="form-label fw-semibold">API Key</label>
-                            <input name="ep_key[]" type="password" class="form-control" autocomplete="new-password" placeholder="{{if $ep.APIKey}}已配置（留空则不修改）{{else}}粘贴 g2a_...{{end}}">
+                            <input name="ep_key[]" type="password" class="form-control" autocomplete="off" readonly onfocus="this.readOnly=false" placeholder="{{if $ep.APIKey}}已配置（留空则不修改）{{else}}粘贴 g2a_...{{end}}">
                         </div>
                         <div class="col-md-2">
                             <label class="form-label fw-semibold">默认模型</label>
@@ -158,11 +158,11 @@
                         </div>
                         <div class="col-md-3">
                             <label class="form-label fw-semibold">API 地址</label>
-                            <input name="ep_url[]" class="form-control" placeholder="https://grok.example.com/v1" required>
+                            <input name="ep_url[]" class="form-control" placeholder="https://grok.example.com/v1">
                         </div>
                         <div class="col-md-3">
                             <label class="form-label fw-semibold">API Key</label>
-                            <input name="ep_key[]" type="password" class="form-control" autocomplete="new-password" placeholder="粘贴 g2a_...">
+                            <input name="ep_key[]" type="password" class="form-control" autocomplete="off" readonly onfocus="this.readOnly=false" placeholder="粘贴 g2a_...">
                         </div>
                         <div class="col-md-2">
                             <label class="form-label fw-semibold">默认模型</label>
@@ -227,7 +227,7 @@
                 </div>
                 <div class="col-md-6">
                     <label class="form-label fw-semibold">Client Secret</label>
-                    <input name="linuxdo_client_secret" type="password" class="form-control" value="" autocomplete="new-password" placeholder="{{if .Settings.linuxdo_client_secret}}已配置（留空则不修改）{{else}}尚未配置{{end}}">
+                    <input name="linuxdo_client_secret" type="password" class="form-control" value="" autocomplete="off" readonly onfocus="this.readOnly=false" placeholder="{{if .Settings.linuxdo_client_secret}}已配置（留空则不修改）{{else}}尚未配置{{end}}">
                 </div>
                 <div class="col-md-12">
                     <label class="form-label fw-semibold">Redirect URI（回调地址）</label>
@@ -281,7 +281,7 @@
                 </div>
                 <div class="col-md-4">
                     <label class="form-label fw-semibold">密码 / SecretKey</label>
-                    <input name="storage_password" type="password" class="form-control" value="" autocomplete="new-password" placeholder="{{if .Settings.storage_password}}已配置（留空则不修改）{{else}}S3: SecretKey；WebDAV: 密码{{end}}">
+                    <input name="storage_password" type="password" class="form-control" value="" autocomplete="off" readonly onfocus="this.readOnly=false" placeholder="{{if .Settings.storage_password}}已配置（留空则不修改）{{else}}S3: SecretKey；WebDAV: 密码{{end}}">
                 </div>
                 <div class="col-md-6">
                     <label class="form-label fw-semibold">远端路径前缀</label>

@@ -572,8 +572,8 @@
       div.innerHTML =
         '<div class="row g-3">' +
         '<div class="col-md-2"><label class="form-label fw-semibold">渠道名称</label><input name="ep_name[]" class="form-control" placeholder="渠道名称"></div>' +
-        '<div class="col-md-3"><label class="form-label fw-semibold">API 地址</label><input name="ep_url[]" class="form-control" placeholder="https://grok.example.com/v1" required></div>' +
-        '<div class="col-md-3"><label class="form-label fw-semibold">API Key</label><input name="ep_key[]" type="password" class="form-control" autocomplete="new-password" placeholder="尚未配置，粘贴密钥"></div>' +
+        '<div class="col-md-3"><label class="form-label fw-semibold">API 地址</label><input name="ep_url[]" class="form-control" placeholder="https://grok.example.com/v1"></div>' +
+        '<div class="col-md-3"><label class="form-label fw-semibold">API Key</label><input name="ep_key[]" type="password" class="form-control" autocomplete="off" readonly onfocus="this.readOnly=false" placeholder="尚未配置，粘贴密钥"></div>' +
         '<div class="col-md-2"><label class="form-label fw-semibold">默认模型</label><input name="ep_model[]" class="form-control" placeholder="grok-imagine-image-lite"></div>' +
         '<div class="col-md-2"><label class="form-label fw-semibold">NSFW 渠道</label><select name="ep_nsfw[]" class="form-select"><option value="0" selected>否</option><option value="1">是</option></select></div>' +
         '</div>' +
