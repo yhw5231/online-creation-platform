@@ -17,7 +17,26 @@
 
 ## 快速开始
 
-### 本地运行
+> 完整部署流程（拉取代码 → 环境准备 → 构建 → 配置 → 启动 → 后台初始化设置 → 反向代理/HTTPS → 运维与排查）参见 **[docs/deployment.md](docs/deployment.md)**。
+
+### 1. 拉取代码
+
+```bash
+git clone https://github.com/yhw5231/online-creation-platform.git
+cd online-creation-platform
+```
+
+### 2. Docker 部署（推荐）
+
+```bash
+docker compose up -d --build
+```
+
+服务运行在 `8900` 端口，数据保存在 `./data`，静态资源挂载自 `./static`。
+
+> 容器以非 root 用户（UID 1000）运行；./data 与 ./static 为 bind-mount，宿主目录需允许 UID 1000 写入，否则日志会出现 WARN: cannot persist session key ... using in-memory key（会话密钥改用内存密钥，建议显式设置 SESSION_SECRET）。
+
+### 3. 源码运行（本地开发）
 
 ```bash
 go build -o app.exe .
@@ -27,19 +46,13 @@ go build -o app.exe .
 ./app.exe
 ```
 
+### 4. 初始化
+
 首次启动会自动创建 `data/creation.db` 数据库，并生成默认管理员 `admin / admin123`（**请尽快在后台修改**）。默认监听 `:8900`。
 
+生产部署还需在管理后台配置：图片生成渠道（API 地址 / Key / 模型 / NSFW 渠道）、注册 / 签到 / 积分规则、第三方登录等，详见 [docs/deployment.md](docs/deployment.md) 第 7 节。
+
 运行单元测试（工具函数与安全行为校验）：`go test ./...`。
-
-### Docker 部署
-
-```bash
-docker compose up -d --build
-```
-
-服务运行在 `8900` 端口，数据保存在 `./data`，静态资源挂载自 `./static`。
-
-> 容器以非 root 用户（UID 1000）运行；./data 与 ./static 为 bind-mount，宿主目录需允许 UID 1000 写入，否则日志会出现 WARN: cannot persist session key ... using in-memory key（会话密钥改用内存密钥，建议显式设置 SESSION_SECRET）。
 
 ## 环境变量
 
