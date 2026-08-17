@@ -8,52 +8,87 @@
 </div>
 
 <div class="card app-card mb-4 fade-in-up">
-    <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">生成兑换码</h6></div>
+    <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">批量生成</h6></div>
     <div class="card-body p-4">
         <form method="POST" action="/admin/redeem-codes/generate" class="row g-3" data-submit="loading">
             <input type="hidden" name="_csrf" value="{{.CSRF}}">
-            <div class="col-md-4">
+            <div class="col-md-3">
+                <label class="form-label fw-semibold">码类型</label>
+                <div class="btn-group w-100" role="group">
+                    <input type="radio" class="btn-check" name="kind" id="kindPoints" value="points" {{if ne .NewKind "register"}}checked{{end}}>
+                    <label class="btn btn-outline-primary" for="kindPoints">积分兑换码</label>
+                    <input type="radio" class="btn-check" name="kind" id="kindRegister" value="register" {{if eq .NewKind "register"}}checked{{end}}>
+                    <label class="btn btn-outline-primary" for="kindRegister">注册码</label>
+                </div>
+            </div>
+            <div class="col-md-3" id="pointsField">
                 <label class="form-label fw-semibold">单码积分数</label>
-                <input type="number" name="points" class="form-control" value="10" min="1" required>
+                <input type="number" name="points" class="form-control" value="{{if .NewPoints}}{{.NewPoints}}{{else}}10{{end}}" min="1" required>
+                <div class="form-text">用户凭码兑换多少积分</div>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label fw-semibold">生成数量</label>
-                <input type="number" name="count" class="form-control" value="1" min="1" max="100" required>
+                <input type="number" name="count" class="form-control" value="{{if .NewCodes}}{{len .NewCodes}}{{else}}1{{end}}" min="1" max="100" required>
+                <div class="form-text">单次最多 100 个</div>
             </div>
-            <div class="col-md-4 d-flex align-items-end">
+            <div class="col-md-3 d-flex align-items-end">
                 <button type="submit" class="btn btn-primary w-100 btn-loading" data-loading-text="生成中...">
-                    <span>生成兑换码</span>
+                    <span>批量生成</span>
                 </button>
             </div>
-            <div class="col-12"><span class="text-muted small">每次最多生成 100 个，兑换码由字母和数字组成（不含易混淆字符）。</span></div>
         </form>
+
+        {{if .NewCodes}}
+        <div class="alert alert-success mt-4 mb-0 p-3">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                <strong class="fs-6">
+                    已生成 {{len .NewCodes}} 个{{if eq .NewKind "register"}}注册码{{else}}积分兑换码（每个 {{.NewPoints}} 积分）{{end}}
+                </strong>
+                <button type="button" class="btn btn-success" id="bulkCopyBtn">一键复制全部</button>
+            </div>
+            <div class="bg-white rounded-3 border p-2 font-monospace small" style="max-height:260px;overflow:auto;">
+                {{range .NewCodes}}<div class="py-1 px-2 border-bottom-subtle">{{.Line}}</div>{{end}}
+            </div>
+            <textarea id="bulkCodes" aria-hidden="true" readonly style="position:fixed;top:0;left:0;opacity:0;pointer-events:none;">{{.NewBulk}}</textarea>
+            <div class="text-muted small mt-2">复制格式：每行一个，物品名 + 码（如 <code>【注册码    ABCDEFGH】</code>、<code>【100积分    ABCDEFGH】</code>）。新码已入库并在下方列表中展示。</div>
+        </div>
+        {{end}}
     </div>
 </div>
 
 <div class="card app-card fade-in-up">
     <div class="card-body p-0">
-        <div class="p-3 d-flex align-items-center">
-            <form method="GET" action="/admin/redeem-codes" class="d-flex gap-2 flex-grow-1" style="max-width: 380px;">
-                <input type="text" name="q" class="form-control form-control-sm" placeholder="按兑换码搜索..." value="{{.Query}}" autocomplete="off" autofocus>
-                <button type="submit" class="btn btn-primary btn-sm px-3 flex-shrink-0">搜索</button>
-                {{if .Query}}<a href="/admin/redeem-codes" class="btn btn-outline-secondary btn-sm px-3 flex-shrink-0">清除</a>{{end}}
+        <div class="p-3 d-flex align-items-center flex-wrap gap-2">
+            <form method="GET" action="/admin/redeem-codes" class="d-flex gap-2 flex-grow-1" style="max-width: 520px;">
+                <select name="t" class="form-select form-select-sm" style="width: auto;" aria-label="类型筛选">
+                    <option value="">全部类型</option>
+                    <option value="points" {{if eq .TypeFilter "points"}}selected{{end}}>积分兑换码</option>
+                    <option value="register" {{if eq .TypeFilter "register"}}selected{{end}}>注册码</option>
+                </select>
+                <input type="text" name="q" class="form-control form-control-sm" placeholder="按码搜索..." value="{{.Query}}" autocomplete="off" autofocus>
+                <button type="submit" class="btn btn-primary btn-sm px-3 flex-shrink-0">筛选</button>
+                {{if or .Query .TypeFilter}}<a href="/admin/redeem-codes" class="btn btn-outline-secondary btn-sm px-3 flex-shrink-0">清除</a>{{end}}
             </form>
         </div>
         {{if gt (len .Codes) 0}}
         <div class="table-responsive">
             <table class="table table-hover app-table mb-0">
                 <thead>
-                    <tr><th>ID</th><th>兑换码</th><th>积分</th><th>状态</th><th>使用者</th><th>使用时间</th><th class="text-end">操作</th></tr>
+                    <tr><th>ID</th><th>类型</th><th>兑换码 / 注册码</th><th>状态</th><th>使用者</th><th>使用时间</th><th class="text-end">操作</th></tr>
                 </thead>
                 <tbody>
                     {{range .Codes}}
                     <tr>
                         <td class="text-muted">{{.ID}}</td>
                         <td>
-                            <code class="redeem-code">{{.Code}}</code>
-                            <button type="button" class="btn btn-sm btn-outline-secondary copy-btn ms-1" data-copy="{{.Code}}">复制</button>
+                            {{if eq .Kind "register"}}<span class="badge text-bg-info">注册码</span>
+                            {{else if eq .Kind ""}}<span class="badge text-bg-secondary">通用</span>
+                            {{else}}<span class="badge text-bg-primary">{{comma .Points}} 积分</span>{{end}}
                         </td>
-                        <td><span class="points-text">{{comma .Points}}</span></td>
+                        <td>
+                            <code class="redeem-code">{{.Code}}</code>
+                            <button type="button" class="btn btn-sm btn-outline-secondary copy-btn ms-1" data-copy="{{.CopyText}}" data-copy-msg="已复制（含物品名）">复制</button>
+                        </td>
                         <td>
                             {{if eq .Status "active"}}<span class="badge text-bg-success">可用</span>
                             {{else if eq .Status "used"}}<span class="badge text-bg-secondary">已使用</span>
@@ -66,7 +101,7 @@
                             <form method="POST" action="/admin/redeem-codes/void" class="d-inline" data-submit="loading">
                                 <input type="hidden" name="_csrf" value="{{$.CSRF}}">
                                 <input type="hidden" name="id" value="{{.ID}}">
-                                <button type="submit" class="btn btn-sm btn-outline-danger btn-loading" data-loading-text="..." data-confirm="确定要作废兑换码 “{{.Code}}” 吗？作废后该码将无法兑换。">作废</button>
+                                <button type="submit" class="btn btn-sm btn-outline-danger btn-loading" data-loading-text="..." data-confirm="确定要作废{{.Label}} “{{.Code}}” 吗？作废后该码将无法使用。">作废</button>
                             </form>
                             {{else}}<span class="text-muted">—</span>{{end}}
                         </td>
@@ -80,11 +115,49 @@
             <div class="empty-state-icon">
                 <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
             </div>
-            <p class="mb-1 fs-5 fw-semibold">{{if .Query}}未找到匹配的兑换码{{else}}还没有兑换码{{end}}</p>
-            <p class="text-muted mb-0">{{if .Query}}换个关键词试试，或清除搜索{{else}}使用上方表单生成第一批兑换码{{end}}</p>
+            <p class="mb-1 fs-5 fw-semibold">{{if or .Query .TypeFilter}}未找到匹配的码{{else}}还没有兑换码{{end}}</p>
+            <p class="text-muted mb-0">{{if or .Query .TypeFilter}}换个关键词试试，或清除筛选{{else}}使用上方表单生成第一批兑换码或注册码{{end}}</p>
         </div>
         {{end}}
         {{template "pagination" .}}
     </div>
 </div>
+
+<script>
+(function () {
+    var kindInputs = document.querySelectorAll('input[name="kind"]');
+    var pointsField = document.getElementById('pointsField');
+    var pointsInput = pointsField ? pointsField.querySelector('input[name="points"]') : null;
+    function syncKind() {
+        var isPoints = document.getElementById('kindPoints') && document.getElementById('kindPoints').checked;
+        if (pointsField && pointsInput) {
+            pointsField.style.display = isPoints ? '' : 'none';
+            pointsInput.required = isPoints;
+        }
+    }
+    kindInputs.forEach(function (el) { el.addEventListener('change', syncKind); });
+    syncKind();
+
+    var bulkBtn = document.getElementById('bulkCopyBtn');
+    if (bulkBtn) {
+        bulkBtn.addEventListener('click', function () {
+            var ta = document.getElementById('bulkCodes');
+            var text = ta ? ta.value : '';
+            var done = function (ok) {
+                bulkBtn.textContent = ok ? '已复制' : '复制失败';
+                setTimeout(function () { bulkBtn.textContent = '一键复制全部'; }, 1600);
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+                return;
+            }
+            ta.focus();
+            ta.select();
+            var ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) {}
+            done(ok);
+        });
+    }
+})();
+</script>
 {{end}}

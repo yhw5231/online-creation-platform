@@ -1034,7 +1034,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			uid, _ := res.LastInsertId()
-			res2, err := tx.Exec("UPDATE redeem_codes SET status='used', used_by=?, used_at=CURRENT_TIMESTAMP WHERE code=? AND status='active'", uid, regCode)
+			res2, err := tx.Exec("UPDATE redeem_codes SET status='used', used_by=?, used_at=CURRENT_TIMESTAMP WHERE code=? AND status='active' AND (kind='' OR kind='register')", uid, regCode)
 			if err != nil {
 				tx.Rollback()
 				http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
@@ -2426,7 +2426,7 @@ func redeemHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var points int64
-		err := models.DB.QueryRow("SELECT points FROM redeem_codes WHERE code=? AND status='active'", code).Scan(&points)
+		err := models.DB.QueryRow("SELECT points FROM redeem_codes WHERE code=? AND status='active' AND (kind='' OR kind='points')", code).Scan(&points)
 		if err != nil {
 			renderRedeem(w, r, "兑换码无效或已被使用", "error")
 			return
@@ -3846,7 +3846,7 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			uid, _ = res.LastInsertId()
-			res2, err := tx.Exec("UPDATE redeem_codes SET status='used', used_by=?, used_at=CURRENT_TIMESTAMP WHERE code=? AND status='active'", uid, regCode)
+			res2, err := tx.Exec("UPDATE redeem_codes SET status='used', used_by=?, used_at=CURRENT_TIMESTAMP WHERE code=? AND status='active' AND (kind='' OR kind='register')", uid, regCode)
 			if err != nil {
 				tx.Rollback()
 				http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
@@ -3908,18 +3908,54 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// redeemCodeLabel 返回兑换码的物品名（列表展示与复制文本共用）：
+// 注册码 → "注册码"；积分码 → "N积分"；旧版未分类码 → "通用"。
+func redeemCodeLabel(kind string, points int64) string {
+	switch kind {
+	case "register":
+		return "注册码"
+	case "":
+		return "通用"
+	default:
+		return fmt.Sprintf("%d积分", points)
+	}
+}
+
+// redeemCodeLine 按用户约定的格式生成一行复制文本：【物品名    码】，如
+// 【注册码    ABCDEFGH】、【100积分    ABCDEFGH】。
+func redeemCodeLine(label, code string) string {
+	return "【" + label + "    " + code + "】"
+}
+
 func adminRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
+	redeemAdminPage(w, r, nil)
+}
+
+// redeemAdminPage 渲染兑换码/注册码管理页（含分页、搜索、类型筛选），
+// extra 可追加模板数据（如批量生成后的新码，供一键复制）。
+func redeemAdminPage(w http.ResponseWriter, r *http.Request, extra map[string]interface{}) {
 	const perPage = 30
 	page := atoiDefault(r.URL.Query().Get("page"), 1)
 	if page < 1 {
 		page = 1
 	}
 	q := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("q")))
+	typeFilter := r.URL.Query().Get("t")
+	// 类型筛选：points = 积分兑换码（含旧版未分类码），register = 注册码
+	kindClause := ""
+	switch typeFilter {
+	case "points":
+		kindClause = " AND (rc.kind='' OR rc.kind='points')"
+	case "register":
+		kindClause = " AND rc.kind='register'"
+	}
 	clause := ""
 	args := []interface{}{}
 	if q != "" {
-		clause = " WHERE rc.code LIKE ? ESCAPE '\\'"
+		clause = " WHERE rc.code LIKE ? ESCAPE '\\'" + kindClause
 		args = append(args, "%"+likeEscape(q)+"%")
+	} else if kindClause != "" {
+		clause = " WHERE 1=1" + kindClause
 	}
 	var total int
 	models.DB.QueryRow("SELECT COUNT(*) FROM redeem_codes rc"+clause, args...).Scan(&total)
@@ -3930,7 +3966,7 @@ func adminRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 	if page > totalPages {
 		page = totalPages
 	}
-	rows, err := models.DB.Query("SELECT rc.id, rc.code, rc.points, rc.status, rc.used_by, rc.used_at, COALESCE(u.username,'') FROM redeem_codes rc LEFT JOIN users u ON u.id = rc.used_by"+clause+" ORDER BY rc.id DESC LIMIT ? OFFSET ?", append(args, perPage, (page-1)*perPage)...)
+	rows, err := models.DB.Query("SELECT rc.id, rc.code, rc.points, rc.kind, rc.status, rc.used_by, rc.used_at, COALESCE(u.username,'') FROM redeem_codes rc LEFT JOIN users u ON u.id = rc.used_by"+clause+" ORDER BY rc.id DESC LIMIT ? OFFSET ?", append(args, perPage, (page-1)*perPage)...)
 	if err != nil {
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
@@ -3941,11 +3977,12 @@ func adminRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 		var id int64
 		var code string
 		var points int64
+		var kind string
 		var status string
 		var usedBy sql.NullInt64
 		var usedAt sql.NullTime
 		var usedByName string
-		if err := rows.Scan(&id, &code, &points, &status, &usedBy, &usedAt, &usedByName); err != nil {
+		if err := rows.Scan(&id, &code, &points, &kind, &status, &usedBy, &usedAt, &usedByName); err != nil {
 			continue
 		}
 		usedByVal := int64(0)
@@ -3956,10 +3993,14 @@ func adminRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 		if usedAt.Valid {
 			usedAtStr = localTime(usedAt.Time.Format("2006-01-02 15:04:05"))
 		}
+		label := redeemCodeLabel(kind, points)
 		codes = append(codes, map[string]interface{}{
 			"ID":         id,
 			"Code":       code,
 			"Points":     points,
+			"Kind":       kind,
+			"Label":      label,
+			"CopyText":   redeemCodeLine(label, code),
 			"Status":     status,
 			"UsedBy":     usedByVal,
 			"UsedByName": usedByName,
@@ -3967,13 +4008,17 @@ func adminRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	pageBase := "/admin/redeem-codes?"
+	if typeFilter != "" {
+		pageBase += "t=" + url.QueryEscape(typeFilter) + "&"
+	}
 	if q != "" {
 		pageBase += "q=" + url.QueryEscape(q) + "&"
 	}
-	renderPage(w, r, "layout.html", map[string]interface{}{
+	data := map[string]interface{}{
 		"Title":      "兑换码管理",
 		"Codes":      codes,
 		"Query":      q,
+		"TypeFilter": typeFilter,
 		"Page":       page,
 		"TotalPages": totalPages,
 		"Total":      total,
@@ -3983,7 +4028,11 @@ func adminRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 		"NextPage":   page + 1,
 		"PageBase":   pageBase,
 		"Content":    "content-redeem-admin",
-	})
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	renderPage(w, r, "layout.html", data)
 }
 
 func adminGenerateRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
@@ -3995,13 +4044,12 @@ func adminGenerateRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 		renderError(w, r, "400", "表单已过期，请刷新页面后重试")
 		return
 	}
-	pointsStr := r.FormValue("points")
-	countStr := r.FormValue("count")
-	points, err := strconv.Atoi(pointsStr)
-	if err != nil || points <= 0 {
-		http.Error(w, "积分值无效", http.StatusBadRequest)
-		return
+	// kind：points = 积分兑换码（需填积分值）；register = 注册码（注册用，无积分）
+	kind := r.FormValue("kind")
+	if kind != "register" {
+		kind = "points"
 	}
+	countStr := r.FormValue("count")
 	count, err := strconv.Atoi(countStr)
 	if err != nil || count <= 0 {
 		http.Error(w, "生成数量无效", http.StatusBadRequest)
@@ -4011,11 +4059,22 @@ func adminGenerateRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "单次最多生成 100 个", http.StatusBadRequest)
 		return
 	}
+	var points int
+	if kind == "points" {
+		points, err = strconv.Atoi(r.FormValue("points"))
+		if err != nil || points <= 0 {
+			http.Error(w, "积分值无效", http.StatusBadRequest)
+			return
+		}
+	}
+	label := redeemCodeLabel(kind, int64(points))
 	uid, _, _ := currentUser(r)
 	consecFails := 0
+	lines := []string{}
+	newCodes := []map[string]interface{}{}
 	for i := 0; i < count; i++ {
 		code := generateRedeemCode()
-		_, err := models.DB.Exec("INSERT INTO redeem_codes(code, points, created_by, status) VALUES(?,?,?,?)", code, points, uid, "active")
+		_, err := models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status) VALUES(?,?,?,?,?)", code, points, kind, uid, "active")
 		if err != nil {
 			// 偶发重复则重试；连续冲突过多（库故障等）时放弃，避免死循环
 			consecFails++
@@ -4027,8 +4086,18 @@ func adminGenerateRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		consecFails = 0
+		line := redeemCodeLine(label, code)
+		lines = append(lines, line)
+		newCodes = append(newCodes, map[string]interface{}{"Code": code, "Line": line})
 	}
-	flashRedirect(w, r, "/admin/redeem-codes", fmt.Sprintf("已生成 %d 个兑换码", count))
+	// 直接渲染页面并携带新生成的码（每行一个：【物品名    码】），
+	// 管理员可立即一键复制，重复刷新不再重复生成。
+	redeemAdminPage(w, r, map[string]interface{}{
+		"NewCodes":  newCodes,
+		"NewBulk":   strings.Join(lines, "\n"),
+		"NewKind":   kind,
+		"NewPoints": points,
+	})
 }
 
 func adminVoidRedeemCodeHandler(w http.ResponseWriter, r *http.Request) {

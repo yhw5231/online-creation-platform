@@ -71,7 +71,8 @@ func migrate() error {
 			used_at DATETIME,
 			created_by INTEGER DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			status TEXT DEFAULT 'active'
+			status TEXT DEFAULT 'active',
+			kind TEXT DEFAULT ''
 		)`,
 		`CREATE TABLE IF NOT EXISTS checkin_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,6 +145,8 @@ func ensureColumns() error {
 		"ALTER TABLE users ADD COLUMN api_key TEXT DEFAULT ''",
 		"ALTER TABLE generation_images ADD COLUMN storage_type TEXT DEFAULT ''",
 		"ALTER TABLE generation_images ADD COLUMN storage_path TEXT DEFAULT ''",
+		// redeem_codes.kind：'' = 旧版通用码（兑换/注册都可用）；'points' = 积分兑换码；'register' = 注册码
+		"ALTER TABLE redeem_codes ADD COLUMN kind TEXT DEFAULT ''",
 	}
 	for _, ddl := range adds {
 		if _, err := DB.Exec(ddl); err != nil {

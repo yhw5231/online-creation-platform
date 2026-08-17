@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -669,5 +670,194 @@ func TestSettingsPersistence(t *testing.T) {
 	save(form3)
 	if got := get("linuxdo_redirect_uri"); got != "https://custom.example.com/oauth/cb" {
 		t.Errorf("custom redirect uri not persisted verbatim, got %q", got)
+	}
+}
+
+func TestRedeemCodeLabel(t *testing.T) {
+	if got := redeemCodeLabel("register", 0); got != "注册码" {
+		t.Errorf("register label = %q", got)
+	}
+	if got := redeemCodeLabel("points", 100); got != "100积分" {
+		t.Errorf("points label = %q", got)
+	}
+	if got := redeemCodeLabel("", 30); got != "通用" {
+		t.Errorf("legacy label = %q", got)
+	}
+	if got := redeemCodeLine("100积分", "ABC123"); got != "【100积分    ABC123】" {
+		t.Errorf("line = %q", got)
+	}
+	if got := redeemCodeLine("注册码", "XYZ789"); got != "【注册码    XYZ789】" {
+		t.Errorf("line = %q", got)
+	}
+}
+
+// TestRedeemCodeTypes 验证积分兑换码 / 注册码分类型生成与使用隔离：
+// 积分码可兑换积分但不能注册；注册码可注册但不能兑换积分；
+// 旧版通用码（kind=''）两者皆可用。
+func TestRedeemCodeTypes(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "redeem.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	// 后台页面渲染依赖模板
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	// 管理会话 + CSRF
+	w := httptest.NewRecorder()
+	r0 := httptest.NewRequest(http.MethodGet, "/admin/redeem-codes", nil)
+	csrf := csrfToken(w, r0)
+	cookie := w.Header().Get("Set-Cookie")
+
+	// 生成：2 个 50 积分码 + 2 个注册码；页面需包含一键复制与复制行格式
+	for _, form := range []url.Values{
+		{"_csrf": {csrf}, "kind": {"points"}, "points": {"50"}, "count": {"2"}},
+		{"_csrf": {csrf}, "kind": {"register"}, "points": {"0"}, "count": {"2"}},
+	} {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, "/admin/redeem-codes/generate", strings.NewReader(form.Encode()))
+		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr.Header.Set("Cookie", cookie)
+		adminGenerateRedeemCodesHandler(ww, rr)
+		if ww.Code != http.StatusOK {
+			t.Fatalf("generate status = %d, body=%s", ww.Code, ww.Body.String())
+		}
+		body := ww.Body.String()
+		if !strings.Contains(body, "一键复制全部") {
+			t.Error("generated page should include the bulk copy button")
+		}
+		if !strings.Contains(body, "【50积分    ") && !strings.Contains(body, "【注册码    ") {
+			t.Errorf("page should show copy lines like 【物品名    码】, got:\n%s", body)
+		}
+	}
+	var pointsCode, regCode string
+	rows, err := models.DB.Query("SELECT code, points, kind FROM redeem_codes WHERE status='active' ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var code, kind string
+		var points int64
+		if rows.Scan(&code, &points, &kind) != nil {
+			continue
+		}
+		if kind == "points" && points == 50 {
+			pointsCode = code
+		}
+		if kind == "register" {
+			regCode = code
+		}
+	}
+	if pointsCode == "" || regCode == "" {
+		t.Fatalf("generated codes missing: points=%q register=%q", pointsCode, regCode)
+	}
+
+	// 旧版通用码（kind=''）：一个用于注册、一个用于兑换
+	legacyReg := "LEGACYREG1"
+	legacyPts := "LEGACYPTS1"
+	models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status) VALUES(?,?,?,?,?)", legacyReg, 0, "", 0, "active")
+	models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status) VALUES(?,?,?,?,?)", legacyPts, 30, "", 0, "active")
+
+	// 兑换用户：直接建用户并伪造登录会话（含 CSRF 令牌）
+	res, _ := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)", "redeemer", "x", 0, "user", 1)
+	uid, _ := res.LastInsertId()
+	makeSession := func(uid int64) (string, string) {
+		w2 := httptest.NewRecorder()
+		r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+		s, err := store.New(r2, "session")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Values["userID"] = uid
+		s.Values["username"] = "redeemer"
+		s.Values["role"] = "user"
+		s.Save(r2, w2)
+		c := w2.Header().Get("Set-Cookie")
+		r3 := httptest.NewRequest(http.MethodGet, "/", nil)
+		r3.Header.Set("Cookie", c)
+		csrf := csrfToken(w2, r3)
+		// csrfToken 会再次写回会话，取最后一次 Set-Cookie 作为完整会话
+		all := w2.Header().Values("Set-Cookie")
+		return csrf, all[len(all)-1]
+	}
+	redeem := func(code string) string {
+		csrf2, c2 := makeSession(uid)
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, "/redeem", strings.NewReader(url.Values{
+			"code":  {code},
+			"_csrf": {csrf2},
+		}.Encode()))
+		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr.Header.Set("Cookie", c2)
+		redeemHandler(ww, rr)
+		return ww.Body.String()
+	}
+	// 积分码可兑换，注册码不可兑换，通用码可兑换
+	if body := redeem(pointsCode); !strings.Contains(body, "兑换成功，获得 50 积分") {
+		t.Errorf("points code redeem failed: %s", truncateRunes(body, 160))
+	}
+	if body := redeem(regCode); !strings.Contains(body, "兑换码无效或已被使用") {
+		t.Errorf("register code must NOT be redeemable: %s", truncateRunes(body, 160))
+	}
+	if body := redeem(legacyPts); !strings.Contains(body, "兑换成功，获得 30 积分") {
+		t.Errorf("legacy code redeem failed: %s", truncateRunes(body, 160))
+	}
+
+	// 注册流程：开启注册码要求；积分码不能注册，注册码/通用码可以
+	models.SetConfig("require_reg_code", "true")
+	models.SetConfig("initial_points", "0")
+	// 专门用于注册尝试的未兑换积分码：验证失败的注册不会消耗它
+	ptsRegCode := "PTSREG1"
+	models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status) VALUES(?,?,?,?,?)", ptsRegCode, 10, "points", 0, "active")
+	w3 := httptest.NewRecorder()
+	r3 := httptest.NewRequest(http.MethodGet, "/register", nil)
+	regCSRF := csrfToken(w3, r3)
+	regCookie := w3.Header().Get("Set-Cookie")
+	register := func(username, code string) (int, string) {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(url.Values{
+			"_csrf":           {regCSRF},
+			"username":        {username},
+			"password":        {"123456"},
+			"confirm_password": {"123456"},
+			"reg_code":        {code},
+		}.Encode()))
+		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr.Header.Set("Cookie", regCookie)
+		registerHandler(ww, rr)
+		return ww.Code, ww.Body.String()
+	}
+	if code, body := register("baduser1", ptsRegCode); !(code == http.StatusOK && strings.Contains(body, "注册码无效或已被使用")) {
+		t.Errorf("points code must NOT register: code=%d body=%s", code, truncateRunes(body, 160))
+	}
+	if code, _ := register("gooduser1", regCode); code != http.StatusSeeOther {
+		t.Errorf("register with register code: status=%d", code)
+	}
+	if code, _ := register("gooduser2", legacyReg); code != http.StatusSeeOther {
+		t.Errorf("register with legacy code: status=%d", code)
+	}
+	// 注册码被消耗，积分码未被消耗
+	var regUsed int
+	models.DB.QueryRow("SELECT COUNT(*) FROM redeem_codes WHERE code=? AND status='used'", regCode).Scan(&regUsed)
+	if regUsed != 1 {
+		t.Errorf("register code should be consumed, used=%d", regUsed)
+	}
+	var ptsStillActive int
+	models.DB.QueryRow("SELECT COUNT(*) FROM redeem_codes WHERE code=? AND status='active'", ptsRegCode).Scan(&ptsStillActive)
+	if ptsStillActive != 1 {
+		t.Error("points code should remain active after failed registration attempts")
+	}
+	var users int
+	models.DB.QueryRow("SELECT COUNT(*) FROM users WHERE username IN ('gooduser1','gooduser2')").Scan(&users)
+	if users != 2 {
+		t.Errorf("registered users = %d, want 2", users)
 	}
 }
