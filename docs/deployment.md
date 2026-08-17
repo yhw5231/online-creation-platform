@@ -273,7 +273,7 @@ sudo journalctl -u online-creation -f   # 查看日志
 > 可添加多个普通渠道 + 一个或多个 NSFW 渠道，创作页自动路由。保存后可在创作页测试生成。
 
 ### 7.5 第三方登录（可选）
-Linux.do OAuth：填写 Client ID / Secret / Redirect URI（Redirect URI 需与 Linux.do 开发者后台配置一致，如 `https://你的域名/auth/linuxdo/callback`）。
+Linux.do OAuth：在「系统设置 → 第三方登录（Linux.do）」中填写 Client ID / Secret / Redirect URI。设置页会**自动显示本平台的回调地址**（格式如 `https://你的域名/auth/linuxdo/callback`），点击「一键填入」「复制」即可使用；该地址必须与 [Linux.do 开发者后台](https://connect.linux.do/oauth/applications) 中应用的 Callback URL 完全一致，否则授权会失败。若 Redirect URI 留空，系统会按当前站点地址自动兜底使用默认回调地址。
 
 ### 7.6 上线前检查清单
 - [ ] 已修改默认管理员密码

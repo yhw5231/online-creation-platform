@@ -602,16 +602,16 @@ func normalizeCheckinRange(minStr, maxStr string) (string, string) {
 }
 
 // oauthEnabled reports whether Linux.do login is fully usable: the switch is
-// on AND the OAuth client is configured (client_id + redirect_uri). The login
-// entry is hidden otherwise.
+// on AND the OAuth client ID is configured. The login entry is hidden
+// otherwise. Redirect URI 不要求必填：未配置时会自动使用当前站点的默认回调
+// 地址（见 linuxdoCallbackURL），管理后台也会提示应填写的 Callback URL。
 func oauthEnabled() bool {
 	on, _ := models.GetConfig("enable_thirdparty_login")
 	if on != "true" {
 		return false
 	}
 	clientID, _ := models.GetConfig("linuxdo_client_id")
-	redirectURI, _ := models.GetConfig("linuxdo_redirect_uri")
-	return strings.TrimSpace(clientID) != "" && strings.TrimSpace(redirectURI) != ""
+	return strings.TrimSpace(clientID) != ""
 }
 
 // siteNotice returns the latest active announcement text ("" when disabled).
@@ -2964,10 +2964,12 @@ func adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		m[k] = v
 	}
 	renderPage(w, r, "layout.html", map[string]interface{}{
-		"Title":     "系统设置",
-		"Settings":  m,
-		"Endpoints": loadEndpoints(),
-		"Content":   "content-settings",
+		"Title":              "系统设置",
+		"Settings":           m,
+		"Endpoints":          loadEndpoints(),
+		"LdoCallback":        linuxdoCallbackURL(r),
+		"LdoDefaultCallback": linuxdoRequestCallback(r),
+		"Content":            "content-settings",
 	})
 }
 
@@ -3321,6 +3323,31 @@ func shortHex() string {
 	return strconv.FormatInt(time.Now().UnixNano(), 16)[:6]
 }
 
+// linuxdoRequestCallback 按当前请求的站点地址生成 Linux.do 回调地址
+// （https://<host>/auth/linuxdo/callback），不读取已保存的配置，用于：
+//   - 管理后台展示“应在 Linux.do 开发者后台填写的 Callback URL”；
+//   - Redirect URI 未配置时兜底使用，保证授权流程可用。
+func linuxdoRequestCallback(r *http.Request) string {
+	host := r.Host
+	if host == "" {
+		host = "localhost"
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.HasPrefix(strings.ToLower(r.Header.Get("X-Forwarded-Proto")), "https") {
+		scheme = "https"
+	}
+	return scheme + "://" + host + "/auth/linuxdo/callback"
+}
+
+// linuxdoCallbackURL 返回 Linux.do OAuth 实际使用的回调地址：优先取后台已保存
+// 的 Redirect URI，未配置时回退到按当前请求生成的默认回调地址。
+func linuxdoCallbackURL(r *http.Request) string {
+	if uri := models.GetConfigOr("linuxdo_redirect_uri", ""); uri != "" {
+		return uri
+	}
+	return linuxdoRequestCallback(r)
+}
+
 // Linux.do OAuth handlers
 func linuxdoHandler(w http.ResponseWriter, r *http.Request) {
 	if !oauthEnabled() {
@@ -3328,11 +3355,13 @@ func linuxdoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID, _ := models.GetConfig("linuxdo_client_id")
-	redirectURI, _ := models.GetConfig("linuxdo_redirect_uri")
-	if clientID == "" || redirectURI == "" {
-		http.Error(w, "OAuth 客户端尚未配置", http.StatusInternalServerError)
+	if clientID == "" {
+		http.Error(w, "OAuth 客户端尚未配置，请先在管理后台填写 Client ID", http.StatusInternalServerError)
 		return
 	}
+	// Redirect URI 未配置时自动使用当前站点默认回调地址，
+	// 保证与 Linux.do 开发者后台填写的 Callback URL 一致即可正常授权。
+	redirectURI := linuxdoCallbackURL(r)
 	next := ""
 	if isSafeLocalPath(r.URL.Query().Get("next")) {
 		next = r.URL.Query().Get("next")
@@ -3376,8 +3405,8 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	clientID, _ := models.GetConfig("linuxdo_client_id")
 	clientSecret, _ := models.GetConfig("linuxdo_client_secret")
-	redirectURI, _ := models.GetConfig("linuxdo_redirect_uri")
-	if clientID == "" || clientSecret == "" || redirectURI == "" {
+	redirectURI := linuxdoCallbackURL(r)
+	if clientID == "" || clientSecret == "" {
 		http.Error(w, "OAuth 客户端尚未配置", http.StatusInternalServerError)
 		return
 	}

@@ -221,17 +221,27 @@
                         <option value="false" {{if eq .Settings.enable_thirdparty_login "false"}}selected{{end}}>关闭</option>
                     </select>
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-6">
                     <label class="form-label fw-semibold">Client ID</label>
                     <input name="linuxdo_client_id" class="form-control" value="{{.Settings.linuxdo_client_id}}">
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-6">
                     <label class="form-label fw-semibold">Client Secret</label>
                     <input name="linuxdo_client_secret" type="password" class="form-control" value="" autocomplete="new-password" placeholder="{{if .Settings.linuxdo_client_secret}}已配置（留空则不修改）{{else}}尚未配置{{end}}">
                 </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">Redirect URI</label>
-                    <input name="linuxdo_redirect_uri" class="form-control" value="{{.Settings.linuxdo_redirect_uri}}">
+                <div class="col-md-12">
+                    <label class="form-label fw-semibold">Redirect URI（回调地址）</label>
+                    <div class="input-group">
+                        <input name="linuxdo_redirect_uri" class="form-control font-monospace" value="{{.Settings.linuxdo_redirect_uri}}" placeholder="{{.LdoDefaultCallback}}">
+                        <button type="button" class="btn btn-outline-primary" id="ldoFillCallback" title="将回调地址填入输入框">一键填入</button>
+                        <button type="button" class="btn btn-outline-secondary" id="ldoCopyCallback" title="复制回调地址">复制</button>
+                    </div>
+                    <div class="form-text mt-2">
+                        请在 <a href="https://connect.linux.do/oauth/applications" target="_blank" rel="noopener">Linux.do 开发者后台</a> 的应用中填写 Callback URL，本平台回调地址应为：<code class="user-select-all">{{.LdoDefaultCallback}}</code>，两边必须完全一致，否则授权会失败。
+                        {{if and .Settings.linuxdo_redirect_uri (ne .Settings.linuxdo_redirect_uri .LdoDefaultCallback)}}
+                        <div class="alert alert-warning py-2 small mt-2 mb-0">当前保存的 Redirect URI（<code>{{.Settings.linuxdo_redirect_uri}}</code>）与本页自动识别的回调地址不一致，请确认填写无误。</div>
+                        {{end}}
+                    </div>
                 </div>
             </div>
         </div>
@@ -315,4 +325,44 @@
         <a href="/admin/settings" class="btn btn-outline-secondary btn-lg">放弃修改</a>
     </div>
 </form>
+
+<div id="ldoCallbackData" data-cb="{{.LdoDefaultCallback}}" hidden></div>
+<script>
+(function () {
+    var el = document.getElementById('ldoCallbackData');
+    if (!el) return;
+    var cb = el.dataset.cb || '';
+    var input = document.querySelector('input[name="linuxdo_redirect_uri"]');
+    var fillBtn = document.getElementById('ldoFillCallback');
+    var copyBtn = document.getElementById('ldoCopyCallback');
+    if (fillBtn && input && cb) {
+        fillBtn.addEventListener('click', function () {
+            input.value = cb;
+            input.focus();
+        });
+    }
+    if (copyBtn && cb) {
+        copyBtn.addEventListener('click', function () {
+            var done = function (ok) {
+                copyBtn.textContent = ok ? '已复制' : '复制失败';
+                setTimeout(function () { copyBtn.textContent = '复制'; }, 1600);
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(cb).then(function () { done(true); }, function () { done(false); });
+                return;
+            }
+            var ta = document.createElement('textarea');
+            ta.value = cb;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            var ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta);
+            done(ok);
+        });
+    }
+})();
+</script>
 {{end}}
