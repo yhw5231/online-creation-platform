@@ -3522,7 +3522,54 @@ func linuxdoCallbackURL(r *http.Request) string {
 	return linuxdoRequestCallback(r)
 }
 
+// Linux.do Connect OAuth 2.0 / OpenID Connect 端点。
+// 与 https://connect.linux.do/.well-known/openid-configuration 公布的一致：
+// 注意授权/令牌接口都在 /oauth2/ 路径下（/oauth/ 路径并不存在，访问会 404
+// 并显示 “Not Found / Please make sure you entered the information correctly”），
+// 用户信息需用 Bearer 令牌调用 /api/user 获取（token 响应只含 access_token，
+// 不直接携带用户 ID/用户名）。
+// 使用 var 而非 const 便于测试注入本地测试服务器地址。
+var (
+	linuxdoAuthorizeURL = "https://connect.linux.do/oauth2/authorize"
+	linuxdoTokenURL     = "https://connect.linux.do/oauth2/token"
+	linuxdoUserInfoURL  = "https://connect.linux.do/api/user"
+	linuxdoScope        = "openid profile email"
+)
+
 // Linux.do OAuth handlers
+
+// fetchLinuxdoUser 用 access_token 调用 Linux.do 用户信息接口，返回用户数字
+// ID 与用户名。Linux.do 的 token 响应只含 access_token，用户身份必须走
+// /api/user（Authorization: Bearer）获取，响应形如：
+//
+//	{"id":12345,"sub":"...","username":"foo","login":"foo","name":"...","email":"...","avatar_url":"...","active":true,"trust_level":2}
+func fetchLinuxdoUser(accessToken string) (userID int64, username, email string, err error) {
+	req, err := http.NewRequest(http.MethodGet, linuxdoUserInfoURL, nil)
+	if err != nil {
+		return 0, "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, "", "", fmt.Errorf("用户信息接口返回 HTTP %d", resp.StatusCode)
+	}
+	var profile struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+		Email    string `json:"email"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
+		return 0, "", "", err
+	}
+	return profile.ID, profile.Username, profile.Email, nil
+}
+
 func linuxdoHandler(w http.ResponseWriter, r *http.Request) {
 	if !oauthEnabled() {
 		http.Error(w, "第三方登录未开启", http.StatusForbidden)
@@ -3557,11 +3604,11 @@ func linuxdoHandler(w http.ResponseWriter, r *http.Request) {
 	session.Values["oauth_next"] = next
 	session.Values["oauth_state"] = oauthState
 	session.Save(r, w)
-	authURL := "https://connect.linux.do/oauth/authorize?" + url.Values{
+	authURL := linuxdoAuthorizeURL + "?" + url.Values{
 		"client_id":     {clientID},
 		"redirect_uri":  {redirectURI},
 		"response_type": {"code"},
-		"scope":         {"read"},
+		"scope":         {linuxdoScope},
 		"state":         {oauthState},
 	}.Encode()
 	http.Redirect(w, r, authURL, http.StatusFound)
@@ -3603,14 +3650,24 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(preSession.Values, "oauth_state")
 	preSession.Save(r, w)
-	tokenURL := "https://connect.linux.do/oauth/token"
-	resp, err := http.PostForm(tokenURL, url.Values{
+	tokenURL := linuxdoTokenURL
+	// 令牌交换使用带超时的独立客户端：上游异常挂起时快速失败，
+	// 避免回调请求长时间占用 Web 服务连接。
+	tokenClient := &http.Client{Timeout: 25 * time.Second}
+	tokenReq, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(url.Values{
 		"client_id":     {clientID},
 		"client_secret": {clientSecret},
 		"code":          {code},
 		"grant_type":    {"authorization_code"},
 		"redirect_uri":  {redirectURI},
-	})
+	}.Encode()))
+	if err != nil {
+		http.Error(w, "获取令牌失败："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenReq.Header.Set("Accept", "application/json")
+	resp, err := tokenClient.Do(tokenReq)
 	if err != nil {
 		http.Error(w, "获取令牌失败："+err.Error(), http.StatusInternalServerError)
 		return
@@ -3620,17 +3677,36 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "令牌接口异常，请稍后重试", http.StatusBadGateway)
 		return
 	}
-	var tokenData struct {
+	var tokenResp struct {
 		AccessToken string `json:"access_token"`
-		UserID      int64  `json:"user_id"`
-		Username    string `json:"username"`
-		Email       string `json:"email"`
+		TokenType   string `json:"token_type"`
+		Error       string `json:"error"`
+		ErrorDesc   string `json:"error_description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenData); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
 		http.Error(w, "解析令牌响应失败", http.StatusInternalServerError)
 		return
 	}
-	if tokenData.Username == "" {
+	if tokenResp.AccessToken == "" {
+		msg := tokenResp.ErrorDesc
+		if msg == "" {
+			msg = tokenResp.Error
+		}
+		if msg == "" {
+			msg = "未返回 access_token"
+		}
+		http.Error(w, "获取令牌失败："+msg, http.StatusBadGateway)
+		return
+	}
+
+	// Linux.do 的 token 响应只包含 access_token，用户信息需用 Bearer 令牌
+	// 调用用户信息接口获取（user_id/username 不在 token 响应中）。
+	userID, username, _, err := fetchLinuxdoUser(tokenResp.AccessToken)
+	if err != nil {
+		http.Error(w, "获取用户信息失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if username == "" {
 		http.Error(w, "第三方未返回用户名", http.StatusInternalServerError)
 		return
 	}
@@ -3644,7 +3720,7 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		// 若该 Linux.do 已绑定过其他账号，禁止重复绑定
 		var boundID int64
-		perr := models.DB.QueryRow("SELECT id FROM users WHERE oauth_provider='linuxdo' AND oauth_id=?", tokenData.UserID).Scan(&boundID)
+		perr := models.DB.QueryRow("SELECT id FROM users WHERE oauth_provider='linuxdo' AND oauth_id=?", userID).Scan(&boundID)
 		if perr == nil && boundID != uid {
 			http.Error(w, "该 Linux.do 账号已绑定其他用户", http.StatusConflict)
 			return
@@ -3653,7 +3729,7 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 			flashRedirect(w, r, "/profile", "已绑定该 Linux.do 账号")
 			return
 		}
-		if _, err := models.DB.Exec("UPDATE users SET oauth_provider='linuxdo', oauth_id=? WHERE id=?", strconv.FormatInt(tokenData.UserID, 10), uid); err != nil {
+		if _, err := models.DB.Exec("UPDATE users SET oauth_provider='linuxdo', oauth_id=? WHERE id=?", strconv.FormatInt(userID, 10), uid); err != nil {
 			http.Error(w, "绑定失败，请稍后重试", http.StatusInternalServerError)
 			return
 		}
@@ -3665,7 +3741,7 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 登录模式：查找已绑定的用户
 	var user models.User
-	err = models.DB.QueryRow("SELECT id, username, password_hash, role, status, points FROM users WHERE oauth_provider='linuxdo' AND oauth_id=?", tokenData.UserID).Scan(
+	err = models.DB.QueryRow("SELECT id, username, password_hash, role, status, points FROM users WHERE oauth_provider='linuxdo' AND oauth_id=?", userID).Scan(
 		&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Status, &user.Points)
 	if err == nil {
 		// existing user
@@ -3690,8 +3766,8 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 首次使用 Linux.do 登录：先完成注册（用户名 + 密码），把 OAuth 身份暂存会话
 	delete(preSession.Values, "oauth_mode")
-	preSession.Values["oauth_pending_user_id"] = tokenData.UserID
-	preSession.Values["oauth_pending_username"] = tokenData.Username
+	preSession.Values["oauth_pending_user_id"] = userID
+	preSession.Values["oauth_pending_username"] = username
 	preSession.Values["oauth_pending_next"] = next
 	preSession.Save(r, w)
 	http.Redirect(w, r, "/auth/linuxdo/setup", http.StatusSeeOther)

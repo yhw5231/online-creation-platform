@@ -1,12 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"online-creation-platform/models"
 	"online-creation-platform/services"
 )
 
@@ -387,5 +391,283 @@ func TestDownloadFromURLSizeCap(t *testing.T) {
 	}
 	if len(got) != 32<<20 {
 		t.Fatalf("expected capped 32MB, got %d bytes", len(got))
+	}
+}
+
+// TestLinuxdoEndpoints guards against regression to the broken /oauth/* paths
+// and the non-supported "read" scope that produced the Linux.do Connect
+// "Not Found / Please make sure you entered the information correctly" page.
+func TestLinuxdoEndpoints(t *testing.T) {
+	if linuxdoAuthorizeURL != "https://connect.linux.do/oauth2/authorize" {
+		t.Errorf("authorize endpoint = %q, want /oauth2/authorize", linuxdoAuthorizeURL)
+	}
+	if linuxdoTokenURL != "https://connect.linux.do/oauth2/token" {
+		t.Errorf("token endpoint = %q, want /oauth2/token", linuxdoTokenURL)
+	}
+	if linuxdoUserInfoURL != "https://connect.linux.do/api/user" {
+		t.Errorf("userinfo endpoint = %q, want /api/user", linuxdoUserInfoURL)
+	}
+	if !strings.Contains(linuxdoScope, "openid") || !strings.Contains(linuxdoScope, "profile") {
+		t.Errorf("scope = %q, want openid/profile/email", linuxdoScope)
+	}
+}
+
+// TestFetchLinuxdoUser verifies the Bearer-token userinfo call and parsing of
+// the Linux.do profile payload (id/username/email), including error paths.
+func TestFetchLinuxdoUser(t *testing.T) {
+	oldURL := linuxdoUserInfoURL
+	defer func() { linuxdoUserInfoURL = oldURL }()
+
+	// happy path: server asserts Authorization header, returns a real-shaped body
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer tok-123" {
+			t.Errorf("Authorization = %q, want Bearer tok-123", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":424242,"sub":"424242","username":"linuxdo_user","login":"linuxdo_user","name":"LD User","email":"u@example.com","active":true,"trust_level":2}`))
+	}))
+	defer srv.Close()
+	linuxdoUserInfoURL = srv.URL
+
+	id, username, email, err := fetchLinuxdoUser("tok-123")
+	if err != nil {
+		t.Fatalf("fetchLinuxdoUser: %v", err)
+	}
+	if id != 424242 || username != "linuxdo_user" || email != "u@example.com" {
+		t.Errorf("got id=%d username=%q email=%q", id, username, email)
+	}
+
+	// non-200 -> error
+	errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"detail":"authorization required"}`))
+	}))
+	defer errSrv.Close()
+	linuxdoUserInfoURL = errSrv.URL
+	if _, _, _, err := fetchLinuxdoUser("bad"); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("expected 401 error, got %v", err)
+	}
+
+	// invalid JSON -> error
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("not-json"))
+	}))
+	defer badSrv.Close()
+	linuxdoUserInfoURL = badSrv.URL
+	if _, _, _, err := fetchLinuxdoUser("tok"); err == nil {
+		t.Error("expected JSON parse error, got nil")
+	}
+}
+
+// TestSettingsPersistence 验证设置页的每一项配置都能落库并再次读取：
+// 普通键值、数字校验、生成渠道（JSON + 兼容旧字段）、密钥留空保留、
+// Redirect URI 支持持久化自定义值并支持“留空 = 自动兜底”。
+func TestSettingsPersistence(t *testing.T) {
+	// 独立临时数据库，避免污染真实配置
+	if err := models.InitDB(filepath.Join(t.TempDir(), "settings.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+
+	// 准备会话与 CSRF 令牌
+	w := httptest.NewRecorder()
+	r0 := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
+	csrf := csrfToken(w, r0)
+	if csrf == "" {
+		t.Fatal("csrf token empty")
+	}
+	cookie := w.Header().Get("Set-Cookie")
+	if cookie == "" {
+		t.Fatal("no session cookie issued")
+	}
+
+	save := func(form url.Values) int {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, "/admin/update-settings", strings.NewReader(form.Encode()))
+		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr.Header.Set("Cookie", cookie)
+		adminUpdateSettingsHandler(ww, rr)
+		return ww.Code
+	}
+	get := func(k string) string {
+		v, err := models.GetConfig(k)
+		if err != nil {
+			return ""
+		}
+		return v
+	}
+
+	// 第一次保存：提交设置页的全部字段
+	form := url.Values{
+		"_csrf":                          {csrf},
+		"site_name":                      {"测试站点"},
+		"generation_cost_points":         {"15"},
+		"open_registration":              {"true"},
+		"enable_password_registration":   {"false"},
+		"enable_thirdparty_registration": {"true"},
+		"require_reg_code":               {"true"},
+		"initial_points":                 {"50"},
+		"enable_daily_checkin":           {"false"},
+		"checkin_mode":                   {"random"},
+		"checkin_fixed_points":           {"7"},
+		"checkin_random_min":             {"3"},
+		"checkin_random_max":             {"9"},
+		"enable_thirdparty_login":        {"true"},
+		"linuxdo_client_id":              {"demo-client-id"},
+		"linuxdo_client_secret":          {"demo-secret"},
+		"linuxdo_redirect_uri":           {"https://auth.example.com/cb"},
+		"storage_type":                   {"s3"},
+		"storage_endpoint":               {"https://oss.example.com"},
+		"storage_bucket":                 {"my-bucket"},
+		"storage_region":                 {"ap-northeast-1"},
+		"storage_username":               {"AKID"},
+		"storage_password":               {"SECRETKEY"},
+		"storage_path_prefix":            {"images"},
+		"cleanup_enabled":                {"true"},
+		"cleanup_keep_days":              {"60"},
+		"cleanup_max_mb":                 {"4096"},
+		"ep_name[]":                      {"主渠道"},
+		"ep_url[]":                       {"https://grok.example.com/v1"},
+		"ep_key[]":                       {"sk-test-123"},
+		"ep_model[]":                     {"grok-imagine-image-lite"},
+		"ep_nsfw[]":                      {"0"},
+		"ep_res[]":                       {"1k,2k"},
+		"ep_models[]":                    {"grok-imagine-image-lite,gpt-image-2"},
+		"ep_extra_models[]":              {"my-model-1"},
+	}
+	if code := save(form); code != http.StatusSeeOther {
+		t.Fatalf("first save status = %d, want 303", code)
+	}
+
+	want := map[string]string{
+		"site_name": "测试站点", "generation_cost_points": "15",
+		"open_registration": "true", "enable_password_registration": "false",
+		"enable_thirdparty_registration": "true", "require_reg_code": "true",
+		"initial_points": "50", "enable_daily_checkin": "false",
+		"checkin_mode": "random", "checkin_fixed_points": "7",
+		"checkin_random_min": "3", "checkin_random_max": "9",
+		"enable_thirdparty_login": "true", "linuxdo_client_id": "demo-client-id",
+		"linuxdo_client_secret": "demo-secret",
+		"linuxdo_redirect_uri":  "https://auth.example.com/cb",
+		"storage_type": "s3", "storage_endpoint": "https://oss.example.com",
+		"storage_bucket": "my-bucket", "storage_region": "ap-northeast-1",
+		"storage_username": "AKID", "storage_password": "SECRETKEY",
+		"storage_path_prefix": "images", "cleanup_enabled": "true",
+		"cleanup_keep_days": "60", "cleanup_max_mb": "4096",
+	}
+	for k, wv := range want {
+		if got := get(k); got != wv {
+			t.Errorf("config[%s] = %q, want %q", k, got, wv)
+		}
+	}
+
+	// 生成渠道持久化为 generation_endpoints JSON，并同步兼容旧字段
+	var eps []GenerationEndpoint
+	if raw := get("generation_endpoints"); raw == "" {
+		t.Fatal("generation_endpoints empty after save")
+	} else if err := json.Unmarshal([]byte(raw), &eps); err != nil {
+		t.Fatalf("endpoints JSON parse: %v", err)
+	}
+	if len(eps) != 1 || eps[0].APIURL != "https://grok.example.com/v1" ||
+		eps[0].APIKey != "sk-test-123" || eps[0].NSFW || eps[0].Name != "主渠道" {
+		t.Errorf("unexpected endpoints persisted: %+v", eps)
+	}
+	if !containsString(eps[0].Models, "gpt-image-2") || !containsString(eps[0].Models, "my-model-1") {
+		t.Errorf("channel models not merged+persisted: %v", eps[0].Models)
+	}
+	if !containsString(eps[0].Resolutions, "1k") {
+		t.Errorf("resolutions not persisted: %v", eps[0].Resolutions)
+	}
+	if get("generation_api_url") != "https://grok.example.com/v1" ||
+		get("generation_model") != "grok-imagine-image-lite" {
+		t.Error("legacy generation_* fields not synced from endpoints")
+	}
+
+	// 第二次保存：仅修改站点名；Redirect URI 留空（= 自动兜底模式）、
+	// 密钥留空（= 保留已保存值）、无效数字与非法随机区间不得覆盖旧值。
+	form2 := url.Values{
+		"_csrf":                          {csrf},
+		"site_name":                      {"新站点名"},
+		"generation_cost_points":         {"abc"}, // 非法：应保留 15
+		"open_registration":              {"true"},
+		"enable_password_registration":   {"false"},
+		"enable_thirdparty_registration": {"true"},
+		"require_reg_code":               {"true"},
+		"initial_points":                 {"50"},
+		"enable_daily_checkin":           {"false"},
+		"checkin_mode":                   {"random"},
+		"checkin_fixed_points":           {"7"},
+		"checkin_random_min":             {"9"}, // 9 > 3：区间非法，两者都应保留
+		"checkin_random_max":             {"3"},
+		"enable_thirdparty_login":        {"true"},
+		"linuxdo_client_id":              {"demo-client-id"},
+		"linuxdo_client_secret":          {""},
+		"linuxdo_redirect_uri":           {""},
+		"storage_type":                   {"s3"},
+		"storage_endpoint":               {"https://oss.example.com"},
+		"storage_bucket":                 {"my-bucket"},
+		"storage_region":                 {"ap-northeast-1"},
+		"storage_username":               {"AKID"},
+		"storage_password":               {""},
+		"storage_path_prefix":            {"images"},
+		"cleanup_enabled":                {"true"},
+		"cleanup_keep_days":              {"60"},
+		"cleanup_max_mb":                 {"4096"},
+		"ep_name[]":                      {"主渠道"},
+		"ep_url[]":                       {"https://grok.example.com/v1"},
+		"ep_key[]":                       {"sk-***"}, // 掩码回显：应保留原密钥
+		"ep_model[]":                     {"grok-imagine-image-lite"},
+		"ep_nsfw[]":                      {"0"},
+		"ep_res[]":                       {"1k,2k"},
+		"ep_models[]":                    {"grok-imagine-image-lite,gpt-image-2"},
+		"ep_extra_models[]":              {"my-model-1"},
+	}
+	if code := save(form2); code != http.StatusSeeOther {
+		t.Fatalf("second save status = %d, want 303", code)
+	}
+	if got := get("site_name"); got != "新站点名" {
+		t.Errorf("site_name after second save = %q", got)
+	}
+	if got := get("generation_cost_points"); got != "15" {
+		t.Errorf("invalid number must keep old value, got %q", got)
+	}
+	if got := get("checkin_random_min"); got != "3" {
+		t.Errorf("invalid random range must keep min, got %q", got)
+	}
+	if got := get("checkin_random_max"); got != "9" {
+		t.Errorf("invalid random range must keep max, got %q", got)
+	}
+	if got := get("linuxdo_client_secret"); got != "demo-secret" {
+		t.Errorf("blank secret must keep saved value, got %q", got)
+	}
+	if got := get("storage_password"); got != "SECRETKEY" {
+		t.Errorf("blank storage password must keep saved value, got %q", got)
+	}
+	if got := get("linuxdo_redirect_uri"); got != "" {
+		t.Errorf("blank redirect uri must persist as empty (auto mode), got %q", got)
+	}
+	// 空 Redirect URI 应触发运行时自动兜底
+	rr := httptest.NewRequest(http.MethodGet, "http://mysite.example.com/auth/linuxdo", nil)
+	if got := linuxdoCallbackURL(rr); got != "http://mysite.example.com/auth/linuxdo/callback" {
+		t.Errorf("auto fallback callback = %q", got)
+	}
+	// 掩码密钥回显不得覆盖真实密钥
+	var eps2 []GenerationEndpoint
+	json.Unmarshal([]byte(get("generation_endpoints")), &eps2)
+	if len(eps2) != 1 || eps2[0].APIKey != "sk-test-123" {
+		t.Errorf("masked key echoed back must keep original, got %+v", eps2)
+	}
+
+	// 自定义 Redirect URI 在后续保存中不再被自动地址覆盖：
+	// 第三次保存带自定义值 → 必须原样持久化
+	form3 := url.Values{
+		"_csrf":                {csrf},
+		"site_name":            {"新站点名"},
+		"linuxdo_redirect_uri": {"https://custom.example.com/oauth/cb"},
+	}
+	save(form3)
+	if got := get("linuxdo_redirect_uri"); got != "https://custom.example.com/oauth/cb" {
+		t.Errorf("custom redirect uri not persisted verbatim, got %q", got)
 	}
 }

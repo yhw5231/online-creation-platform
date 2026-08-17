@@ -321,13 +321,14 @@
                 <div class="col-md-12">
                     <label class="form-label fw-semibold">Redirect URI（回调地址）</label>
                     <div class="input-group">
-                        <input name="linuxdo_redirect_uri" class="form-control font-monospace" value="{{.LdoDefaultCallback}}" readonly autocomplete="off">
-                        <button type="button" class="btn btn-outline-secondary" id="ldoCopyCallback" title="复制回调地址">复制</button>
+                        <input name="linuxdo_redirect_uri" class="form-control font-monospace" value="{{if .Settings.linuxdo_redirect_uri}}{{.Settings.linuxdo_redirect_uri}}{{end}}" placeholder="{{.LdoDefaultCallback}}" autocomplete="off">
+                        <button type="button" class="btn btn-outline-secondary" id="ldoFillCallback" title="将本平台自动识别的回调地址填入输入框">填入当前地址</button>
+                        <button type="button" class="btn btn-outline-secondary" id="ldoCopyCallback" title="复制本平台自动识别的回调地址">复制</button>
                     </div>
                     <div class="form-text mt-2">
-                        请在 <a href="https://connect.linux.do/oauth/applications" target="_blank" rel="noopener">Linux.do 开发者后台</a> 的应用中填写 Callback URL，本平台回调地址应为：<code class="user-select-all">{{.LdoDefaultCallback}}</code>，两边必须完全一致，否则授权会失败。
+                        请在 <a href="https://connect.linux.do" target="_blank" rel="noopener">Linux.do 开发者后台</a>（Linux.do Connect 官网登录后创建应用）中把应用的 Callback URL 填写为：<code class="user-select-all">{{.LdoDefaultCallback}}</code>，两边必须完全一致，否则授权会失败。本输入框保存后即持久化；<strong>留空保存 = 自动模式</strong>：每次按当前站点地址动态使用该回调地址，更换域名后无需改动。
                         {{if and .Settings.linuxdo_redirect_uri (ne .Settings.linuxdo_redirect_uri .LdoDefaultCallback)}}
-                        <div class="alert alert-warning py-2 small mt-2 mb-0">当前保存的 Redirect URI（<code>{{.Settings.linuxdo_redirect_uri}}</code>）与本页自动识别的回调地址不一致，请确认填写无误。</div>
+                        <div class="alert alert-warning py-2 small mt-2 mb-0">当前保存的 Redirect URI（<code>{{.Settings.linuxdo_redirect_uri}}</code>）与本页自动识别的回调地址不一致。如需改回自动模式，请清空输入框后保存。</div>
                         {{end}}
                     </div>
                 </div>
