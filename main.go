@@ -68,17 +68,31 @@ type genTask struct {
 // GenerationEndpoint 描述图片生成服务的一个渠道（多接口列表中的一项）。
 // Resolutions 为该渠道支持的分辨率档位（如 1k/2k/4k）；未配置或配置为空时
 // 视为不限制（默认按 1k/2k 提供选项）。
+// Models 为该渠道"可用模型"列表（创作界面按渠道展示、可切换）；未配置时
+// 默认提供 defaultModels 快捷选项。
 type GenerationEndpoint struct {
 	Name        string   `json:"name"`
 	APIURL      string   `json:"api_url"`
 	APIKey      string   `json:"api_key"`
 	Model       string   `json:"model"`
+	Models      []string `json:"models,omitempty"`
 	NSFW        bool     `json:"nsfw"`
 	Resolutions []string `json:"resolutions,omitempty"`
 }
 
 // defaultResolutions 是渠道未配置分辨率档位时的默认选项。
 var defaultResolutions = []string{"1k", "2k"}
+
+// defaultModels 是渠道未配置可用模型时默认提供的快捷选项
+// （与设置页"可用模型"多选框选项一致）。
+var defaultModels = []string{
+	"grok-imagine-image-lite",
+	"grok-imagine-image",
+	"grok-imagine-image-edit",
+	"grok-imagine-image-2.0",
+	"grok-imagine-video",
+	"gpt-image-2",
+}
 
 // sessionKeyPath is where a generated signing key is persisted; a package
 // variable so tests can redirect it to a temp location.
@@ -276,6 +290,7 @@ func main() {
 		"hasRes": func(list []string, v string) bool {
 			return containsString(list, v)
 		},
+		"maskKey": maskKey,
 	}).ParseGlob("templates/*.html"))
 	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
 
@@ -655,7 +670,7 @@ func noticesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	renderPublicPage(w, r, "公告", "content-notices", map[string]interface{}{
-		"Notices": list,
+		"Notices":      list,
 		"NoticesEmpty": len(list) == 0,
 	})
 }
@@ -967,6 +982,11 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		renderError(w, r, "403", "注册功能已关闭，请联系管理员开通")
 		return
 	}
+	pwReg, _ := models.GetConfig("enable_password_registration")
+	if pwReg != "true" {
+		renderRegister(w, r, "用户名密码注册已关闭，请通过第三方账号登录", next, "")
+		return
+	}
 	if r.Method == http.MethodPost {
 		if !verifyCSRF(r) {
 			renderError(w, r, "400", "表单已过期，请刷新页面后重试")
@@ -1260,7 +1280,7 @@ func profileHandler(w http.ResponseWriter, r *http.Request) {
 			models.DB.QueryRow("SELECT COALESCE(oauth_provider,'') FROM users WHERE id=?", uid).Scan(&p)
 			return p
 		}(),
-		"Content":      "content-profile",
+		"Content": "content-profile",
 	})
 }
 
@@ -1320,6 +1340,9 @@ func createPage(w http.ResponseWriter, r *http.Request, extra map[string]interfa
 		if v, ok := sess.Values["lastN"].(string); ok && v != "" {
 			data["LastN"] = v
 		}
+		if v, ok := sess.Values["lastModel"].(string); ok && v != "" {
+			data["LastModel"] = v
+		}
 	}
 	// 从 /records 点「再生成」带过来的提示词，直接回填到表单
 	if p := strings.TrimSpace(r.URL.Query().Get("prompt")); p != "" {
@@ -1372,6 +1395,24 @@ func createPage(w http.ResponseWriter, r *http.Request, extra map[string]interfa
 		}
 	}
 	data["DefResolution"] = defResolution
+	// 默认渠道的模型：上次选择（会话内）在渠道可用模型内则沿用，否则取第一个
+	defModel := ""
+	if defIdx >= 0 && defIdx < len(eps) {
+		last := ""
+		if v, ok := data["LastModel"].(string); ok {
+			last = v
+		}
+		for _, m := range eps[defIdx].Models {
+			if m == last {
+				defModel = m
+				break
+			}
+		}
+		if defModel == "" && len(eps[defIdx].Models) > 0 {
+			defModel = eps[defIdx].Models[0]
+		}
+	}
+	data["DefModel"] = defModel
 	data["RecentTasks"] = recentTasks(uid, 3)
 	for k, v := range extra {
 		data[k] = v
@@ -1419,6 +1460,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	lastRatio := r.FormValue("aspect_ratio")
 	lastResolution := r.FormValue("resolution")
 	lastN := r.FormValue("n")
+	lastModel := strings.TrimSpace(r.FormValue("model"))
 	// 返回格式由系统后台自适应固定为 URL（生成图片本地落盘，统一以
 	// 图片路径提供），创作界面不再提供 url/b64_json 选择。
 	lastFormat := "url"
@@ -1428,6 +1470,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		sess.Values["lastRatio"] = lastRatio
 		sess.Values["lastResolution"] = lastResolution
 		sess.Values["lastN"] = lastN
+		sess.Values["lastModel"] = lastModel
 		sess.Save(r, w)
 	}
 	n := atoiDefault(lastN, 1)
@@ -1445,8 +1488,8 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 
 	if lastPrompt == "" {
 		createPage(w, r, map[string]interface{}{
-			"Error":      "请输入提示词",
-			"LastN":      lastN,
+			"Error": "请输入提示词",
+			"LastN": lastN,
 		})
 		return
 	}
@@ -1506,6 +1549,19 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 所选渠道的模型校验：创作界面只提供渠道可用模型，提交其它模型时拦截
+	if lastModel != "" && !containsString(selectedEp.Models, lastModel) {
+		createPage(w, r, map[string]interface{}{
+			"Error":          fmt.Sprintf("所选渠道不支持模型 %s，请选择渠道支持的模型", lastModel),
+			"LastPrompt":     lastPrompt,
+			"LastChannel":    lastChannel,
+			"LastRatio":      lastRatio,
+			"LastResolution": lastResolution,
+			"LastN":          lastN,
+		})
+		return
+	}
+
 	// 条件扣减：只有余额足够才扣，从根上杜绝并发请求把积分扣成负数
 	res, err := models.DB.Exec("UPDATE users SET points = points - ? WHERE id=? AND points >= ?", cost, userID, cost)
 	if err != nil {
@@ -1524,8 +1580,11 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 记录渠道名与渠道默认模型：创作界面只展示渠道名，生成使用渠道配置的模型
-	chanModel := strings.TrimSpace(selectedEp.Model)
+	// 优先使用用户在创作界面选择的模型；未选择时回退渠道默认模型
+	chanModel := strings.TrimSpace(lastModel)
+	if chanModel == "" {
+		chanModel = strings.TrimSpace(selectedEp.Model)
+	}
 	if chanModel == "" {
 		chanModel = models.GetConfigOr("generation_model", "grok-imagine-image-lite")
 	}
@@ -1581,6 +1640,10 @@ func loadEndpoints() []GenerationEndpoint {
 					if len(valid[i].Resolutions) == 0 {
 						valid[i].Resolutions = append([]string(nil), defaultResolutions...)
 					}
+					// 未配置可用模型时按默认快捷模型提供选项
+					if len(valid[i].Models) == 0 {
+						valid[i].Models = append([]string(nil), defaultModels...)
+					}
 				}
 				return valid
 			}
@@ -1619,12 +1682,14 @@ func selectEndpoint(nsfw bool) (GenerationEndpoint, error) {
 
 // channelOption 是创作界面渠道下拉的一个选项（引用全局渠道下标）。
 type channelOption struct {
-	Idx           int
-	Name          string
-	NSFW          bool
-	NSFWStr       string // "1"/"0"，供模板生成 data-nsfw 标记
-	Resolutions   []string
+	Idx            int
+	Name           string
+	NSFW           bool
+	NSFWStr        string // "1"/"0"，供模板生成 data-nsfw 标记
+	Resolutions    []string
 	ResolutionsCSV string // 逗号分隔，供模板生成 data-resolutions 标记
+	Models         []string
+	ModelsCSV      string // 逗号分隔，供模板生成 data-models 标记
 }
 
 // allChannels 返回创作界面可选的完整渠道列表（普通 + NSFW 都展示，
@@ -1644,9 +1709,14 @@ func allChannels() []channelOption {
 		if len(res) == 0 {
 			res = append([]string(nil), defaultResolutions...)
 		}
+		ms := ep.Models
+		if len(ms) == 0 {
+			ms = append([]string(nil), defaultModels...)
+		}
 		opts = append(opts, channelOption{
 			Idx: i, Name: name, NSFW: ep.NSFW, NSFWStr: nsfwStr,
 			Resolutions: res, ResolutionsCSV: strings.Join(res, ","),
+			Models: ms, ModelsCSV: strings.Join(ms, ","),
 		})
 	}
 	return opts
@@ -1836,13 +1906,21 @@ func processGeneration(recordID int64) {
 	imageURL := ""
 	storageType := ""
 	storageRefByID := map[int]string{}
+	savedAny := false
 	for i := range resp.Data {
 		item := resp.Data[i]
 		src := item.URL
 		if src == "" && item.B64 != "" {
 			src = "data:image/png;base64," + item.B64
+		} else if src != "" {
+			// 部分网关在响应里回带自身回环/内网地址（如 127.0.0.1:8000），
+			// 应用服务器与浏览器都无法直连：改写为渠道网关的公网主机再下载，
+			// 并同步修正落库地址，避免缩略图裂图。
+			src = rewriteLoopbackURL(src, ep.APIURL)
+			resp.Data[i].URL = src
 		}
 		if saved, err := saveImageLocally(src, client); err == nil {
+			savedAny = true
 			resp.Data[i].URL = saved
 			resp.Data[i].B64 = ""
 			if i == 0 {
@@ -1861,6 +1939,12 @@ func processGeneration(recordID int64) {
 				}
 			}
 		}
+	}
+	// 全部图片都未成功归档（下载失败/解码失败）时绝不保留"空成功"：
+	// 标记失败并退回积分，避免出现"成功但无图"的任务与裂图缩略图。
+	if !savedAny {
+		markTaskFailed(recordID, "生成成功但图片归档失败，积分已退回，请重试")
+		return
 	}
 	updRes, _ := models.DB.Exec("UPDATE generation_records SET status='success', image_url=?, channel=? WHERE id=? AND status='processing'",
 		imageURL, ep.Name, recordID)
@@ -3048,6 +3132,8 @@ func saveEndpointsFromForm(r *http.Request) {
 	epModels := r.Form["ep_model[]"]
 	nsfws := r.Form["ep_nsfw[]"]
 	epRes := r.Form["ep_res[]"]
+	availModels := r.Form["ep_models[]"]
+	extraModels := r.Form["ep_extra_models[]"]
 	oldByURL := map[string]string{}
 	for _, ep := range loadEndpoints() {
 		if ep.APIKey != "" {
@@ -3070,6 +3156,12 @@ func saveEndpointsFromForm(r *http.Request) {
 		}
 		if key == "" {
 			key = oldByURL[url] // 留空 = 保留已保存的密钥
+		} else if old, ok := oldByURL[url]; ok && key == maskKey(old) {
+			key = old // 提交的是掩码回显值（前10位+*） = 密钥未修改，保留已保存的密钥
+		} else if strings.Contains(key, "*") {
+			// 含 * 的掩码值但找不到对应旧密钥（例如修改了 API 地址）：
+			// 绝不把掩码当真实密钥落库，沿用旧密钥（可能是空）。
+			key = oldByURL[url]
 		}
 		m := ""
 		if i < len(epModels) {
@@ -3094,7 +3186,31 @@ func saveEndpointsFromForm(r *http.Request) {
 		if len(resolutions) == 0 {
 			resolutions = append([]string(nil), defaultResolutions...)
 		}
-		eps = append(eps, GenerationEndpoint{Name: name, APIURL: url, APIKey: key, Model: m, NSFW: nsfw, Resolutions: resolutions})
+		// 可用模型：预设多选（ep_models[]）与自定义补充（ep_extra_models[]）
+		// 合并去重；逗号/中文逗号分隔，去除空白；为空则使用默认快捷模型
+		ms := []string{}
+		if i < len(availModels) || i < len(extraModels) {
+			split := func(s string) {
+				for _, part := range strings.FieldsFunc(s, func(c rune) bool {
+					return c == ',' || c == '，' || c == ' '
+				}) {
+					part = strings.TrimSpace(part)
+					if part != "" && !containsString(ms, part) {
+						ms = append(ms, part)
+					}
+				}
+			}
+			if i < len(availModels) {
+				split(availModels[i])
+			}
+			if i < len(extraModels) {
+				split(extraModels[i])
+			}
+		}
+		if len(ms) == 0 {
+			ms = append([]string(nil), defaultModels...)
+		}
+		eps = append(eps, GenerationEndpoint{Name: name, APIURL: url, APIKey: key, Model: m, Models: ms, NSFW: nsfw, Resolutions: resolutions})
 	}
 	if len(eps) == 0 {
 		// 全部删除：清空多渠道与旧字段，停用生成服务
@@ -3115,6 +3231,21 @@ func saveEndpointsFromForm(r *http.Request) {
 			return
 		}
 	}
+}
+
+// maskKey 返回密钥的前 10 个字符，其余字符以 * 掩码隐藏；
+// 用于设置页回显已配置的渠道密钥，避免泄露完整密钥。
+// 密钥长度不超过 10 位时原样返回。模板中通过 {{maskKey $ep.APIKey}} 调用。
+func maskKey(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= 10 {
+		return s
+	}
+	return string(r[:10]) + strings.Repeat("*", len(r)-10)
 }
 
 func adminResetSettingsHandler(w http.ResponseWriter, r *http.Request) {
@@ -3246,6 +3377,49 @@ func storageTypeOf() string {
 		return ""
 	}
 	return t
+}
+
+// rewriteLoopbackURL 把上游返回的图片地址中的回环/链路本地主机替换为渠道
+// 网关自身的公网主机（很多网关响应里回带 127.0.0.1:8000 之类自身内网地址，
+// 应用服务器与浏览器都无法直连，换成 [scheme]://[渠道公网主机]/[原路径] 即可
+// 正常访问）。非 http(s) 地址、非回环地址或渠道地址解析失败时原样返回。
+func rewriteLoopbackURL(rawURL, baseURL string) string {
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	if !isUnreachableHost(u.Hostname()) {
+		return rawURL
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil || base.Host == "" {
+		return rawURL
+	}
+	// 渠道地址本身也是回环（网关与平台同机）时没有可替换的公网主机，原样返回
+	if isUnreachableHost(base.Hostname()) {
+		return rawURL
+	}
+	u.Host = base.Host
+	u.Scheme = base.Scheme
+	return u.String()
+}
+
+// isUnreachableHost 判断主机名是否为应用服务器无法直连的
+// 回环/链路本地地址（网关自己机器上的地址）。
+func isUnreachableHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "localhost" || h == "127.0.0.1" || h == "0.0.0.0" || h == "::1" || h == "::" {
+		return true
+	}
+	// 去掉 IPv6 的 [ ] 包裹
+	h = strings.Trim(h, "[]")
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback() || ip.IsLinkLocalUnicast()
+	}
+	return false
 }
 
 // saveImageLocally downloads an upstream media URL (or decodes base64) using
@@ -3507,6 +3681,13 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		flashRedirect(w, r, oauthTarget(next), "欢迎回来，"+user.Username)
 		return
 	}
+	// 首次使用 Linux.do 登录：需开放注册且开放第三方注册，方可创建新账号
+	openReg, _ := models.GetConfig("open_registration")
+	thirdReg, _ := models.GetConfig("enable_thirdparty_registration")
+	if openReg != "true" || thirdReg != "true" {
+		http.Error(w, "第三方注册未开放，请联系管理员", http.StatusForbidden)
+		return
+	}
 	// 首次使用 Linux.do 登录：先完成注册（用户名 + 密码），把 OAuth 身份暂存会话
 	delete(preSession.Values, "oauth_mode")
 	preSession.Values["oauth_pending_user_id"] = tokenData.UserID
@@ -3532,6 +3713,12 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 	pendingName, ok2 := session.Values["oauth_pending_username"].(string)
 	if !ok1 || pendingUID == 0 || !ok2 || pendingName == "" {
 		flashRedirect(w, r, "/login", "请先通过 Linux.do 授权后再完成注册")
+		return
+	}
+	openReg, _ := models.GetConfig("open_registration")
+	thirdReg, _ := models.GetConfig("enable_thirdparty_registration")
+	if openReg != "true" || thirdReg != "true" {
+		flashRedirect(w, r, "/login", "第三方注册已关闭，无法完成注册")
 		return
 	}
 
@@ -3971,9 +4158,9 @@ func apiGenerateHandler(w http.ResponseWriter, r *http.Request) {
 	taskQueue <- genTask{recordID: rid}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ok":       true,
-		"task_id":  rid,
-		"message":  "任务已提交",
+		"ok":      true,
+		"task_id": rid,
+		"message": "任务已提交",
 	})
 }
 

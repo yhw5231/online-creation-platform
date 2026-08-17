@@ -46,12 +46,26 @@
                             {{if .Channels}}
                             <select name="channel" class="form-select" id="channelSelect" required>
                                 {{range .Channels}}
-                                <option value="{{.Idx}}" data-nsfw="{{.NSFWStr}}" data-resolutions="{{.ResolutionsCSV}}" {{if eq .Idx $.DefChannelIdx}}selected{{end}}>{{.Name}}</option>
+                                <option value="{{.Idx}}" data-nsfw="{{.NSFWStr}}" data-resolutions="{{.ResolutionsCSV}}" data-models="{{.ModelsCSV}}" {{if eq .Idx $.DefChannelIdx}}selected{{end}}>{{.Name}}</option>
                                 {{end}}
                             </select>
                             <div class="form-text">按所选渠道生成，使用该渠道配置的默认模型与分辨率档位。</div>
                             {{else}}
                             <div class="alert alert-warning small py-2 mb-0">暂无可用的生成渠道，请联系管理员在系统设置中配置。</div>
+                            {{end}}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">模型</label>
+                            {{if .Channels}}
+                            <select name="model" class="form-select" id="modelSelect">
+                                {{$curModel := $.DefModel}}
+                                {{range .Channels}}{{if eq .Idx $.DefChannelIdx}}{{range .Models}}
+                                <option value="{{.}}" {{if eq $curModel .}}selected{{end}}>{{.}}</option>
+                                {{end}}{{end}}{{end}}
+                            </select>
+                            <div class="form-text">模型由所选渠道的可用模型决定，切换渠道后自动更新。</div>
+                            {{else}}
+                            <div class="alert alert-warning small py-2 mb-0">暂无可用的生成渠道。</div>
                             {{end}}
                         </div>
                         <div class="col-md-3">

@@ -256,12 +256,14 @@
     update();
   })();
 
-  /* ---------- 渠道切换：分辨率档位联动 ---------- */
+  /* ---------- 渠道切换：分辨率档位 + 模型联动 ---------- */
   (function channelResolutions() {
     var chSel = document.getElementById('channelSelect');
     var resSel = document.getElementById('resolutionSelect');
-    if (!chSel || !resSel) return;
+    var modelSel = document.getElementById('modelSelect');
+    if (!chSel) return;
     function rebuildResolutions() {
+      if (!resSel) return;
       var opt = chSel.options[chSel.selectedIndex];
       if (!opt) return;
       var csv = opt.getAttribute('data-resolutions') || '';
@@ -280,8 +282,34 @@
         resSel.value = prev;
       }
     }
-    chSel.addEventListener('change', rebuildResolutions);
+    function rebuildModels() {
+      if (!modelSel) return;
+      var opt = chSel.options[chSel.selectedIndex];
+      if (!opt) return;
+      var csv = opt.getAttribute('data-models') || '';
+      var list = csv.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      if (!list.length) {
+        list = ['grok-imagine-image-lite', 'grok-imagine-image', 'grok-imagine-image-edit', 'grok-imagine-image-2.0', 'grok-imagine-video', 'gpt-image-2'];
+      }
+      var prev = modelSel.value;
+      modelSel.innerHTML = '';
+      list.forEach(function (m) {
+        var o = document.createElement('option');
+        o.value = m;
+        o.textContent = m;
+        modelSel.appendChild(o);
+      });
+      // 保留旧选择，若新渠道不支持则回退到第一个模型
+      if (list.indexOf(prev) !== -1) {
+        modelSel.value = prev;
+      }
+    }
+    chSel.addEventListener('change', function () {
+      rebuildResolutions();
+      rebuildModels();
+    });
     rebuildResolutions();
+    rebuildModels();
   })();
 
   /* ---------- 灵感示例 chips ---------- */
@@ -571,10 +599,10 @@
       div.className = 'endpoint-row border rounded-3 p-3 mb-3 bg-white';
       div.innerHTML =
         '<div class="row g-3">' +
-        '<div class="col-md-2"><label class="form-label fw-semibold">渠道名称</label><input name="ep_name[]" class="form-control" placeholder="渠道名称"></div>' +
-        '<div class="col-md-3"><label class="form-label fw-semibold">API 地址</label><input name="ep_url[]" class="form-control" placeholder="https://grok.example.com/v1"></div>' +
-        '<div class="col-md-3"><label class="form-label fw-semibold">API Key</label><input name="ep_key[]" type="password" class="form-control" autocomplete="off" readonly onfocus="this.readOnly=false" placeholder="尚未配置，粘贴密钥"></div>' +
-        '<div class="col-md-2"><label class="form-label fw-semibold">默认模型</label><input name="ep_model[]" class="form-control" placeholder="grok-imagine-image-lite"></div>' +
+        '<div class="col-md-2"><label class="form-label fw-semibold">渠道名称</label><input name="ep_name[]" class="form-control" autocomplete="off" placeholder="渠道名称"></div>' +
+        '<div class="col-md-3"><label class="form-label fw-semibold">API 地址</label><input name="ep_url[]" class="form-control" autocomplete="off" placeholder="https://grok.example.com/v1"></div>' +
+        '<div class="col-md-3"><label class="form-label fw-semibold">API Key</label><input name="ep_key[]" type="text" class="form-control" autocomplete="off" placeholder="尚未配置，粘贴密钥"></div>' +
+        '<div class="col-md-2"><label class="form-label fw-semibold">默认模型</label><input name="ep_model[]" class="form-control" list="ep-model-list" placeholder="grok-imagine-image-lite"></div>' +
         '<div class="col-md-2"><label class="form-label fw-semibold">NSFW 渠道</label><select name="ep_nsfw[]" class="form-select"><option value="0" selected>否</option><option value="1">是</option></select></div>' +
         '</div>' +
         '<div class="row g-3 mt-1">' +
@@ -586,6 +614,19 @@
         '</div>' +
         '<input type="hidden" name="ep_res[]" class="ep-res-input" value="1k,2k">' +
         '<div class="form-text">用户创作时只能选择勾选的档位（可多选）；全不勾选则默认提供 1k,2k。</div>' +
+        '</div>' +
+        '<div class="col-md-6"><label class="form-label fw-semibold">可用模型（多选）</label>' +
+        '<div class="d-flex flex-wrap gap-3 pt-1">' +
+        '<span class="ep-model-check"><input class="form-check-input" type="checkbox" data-model="grok-imagine-image-lite" checked><label class="form-check-label small">grok-imagine-image-lite</label></span>' +
+        '<span class="ep-model-check"><input class="form-check-input" type="checkbox" data-model="grok-imagine-image" checked><label class="form-check-label small">grok-imagine-image</label></span>' +
+        '<span class="ep-model-check"><input class="form-check-input" type="checkbox" data-model="grok-imagine-image-edit" checked><label class="form-check-label small">grok-imagine-image-edit</label></span>' +
+        '<span class="ep-model-check"><input class="form-check-input" type="checkbox" data-model="grok-imagine-image-2.0" checked><label class="form-check-label small">grok-imagine-image-2.0</label></span>' +
+        '<span class="ep-model-check"><input class="form-check-input" type="checkbox" data-model="grok-imagine-video" checked><label class="form-check-label small">grok-imagine-video</label></span>' +
+        '<span class="ep-model-check"><input class="form-check-input" type="checkbox" data-model="gpt-image-2" checked><label class="form-check-label small">gpt-image-2</label></span>' +
+        '</div>' +
+        '<input type="hidden" name="ep_models[]" class="ep-models-input" value="grok-imagine-image-lite,grok-imagine-image,grok-imagine-image-edit,grok-imagine-image-2.0,grok-imagine-video,gpt-image-2">' +
+        '<input name="ep_extra_models[]" class="ep-extra-models form-control form-control-sm mt-2" autocomplete="off" placeholder="自定义模型（逗号分隔），如 my-model-1, my-model-2">' +
+        '<div class="form-text">用户创作时可在所选渠道勾选的模型中切换；默认模型见上方输入框（可手动输入自定义模型）。</div>' +
         '</div>' +
         '</div>' +
         '<div class="mt-2 text-end"><button type="button" class="btn btn-sm btn-outline-danger endpoint-del">删除此渠道</button></div>';
@@ -601,12 +642,56 @@
       });
       input.value = checked.join(',');
     }
+    // 可用模型：预设勾选 + 自定义补充（逗号分隔）合并写入隐藏提交字段
+    var PRESET_MODELS = ['grok-imagine-image-lite', 'grok-imagine-image', 'grok-imagine-image-edit', 'grok-imagine-image-2.0', 'grok-imagine-video', 'gpt-image-2'];
+    function syncEpModels(container) {
+      var input = container.querySelector('.ep-models-input');
+      if (!input) return;
+      var list = [];
+      Array.prototype.slice.call(container.querySelectorAll('.ep-model-check input:checked')).forEach(function (cb) {
+        var m = cb.getAttribute('data-model');
+        if (list.indexOf(m) === -1) list.push(m);
+      });
+      var extra = container.querySelector('.ep-extra-models');
+      if (extra && extra.value.trim()) {
+        extra.value.split(/[,，]/).forEach(function (s) {
+          s = s.trim();
+          if (s && list.indexOf(s) === -1) list.push(s);
+        });
+      }
+      input.value = list.join(',');
+    }
+    function initEpModels(row) {
+      var hidden = row.querySelector('.ep-models-input');
+      var extra = row.querySelector('.ep-extra-models');
+      if (!hidden || !extra) return;
+      // 已保存但不在预设内的模型回填到自定义输入框，避免保存后丢失
+      var custom = hidden.value.split(/[,，]/).map(function (s) { return s.trim(); })
+        .filter(function (s) { return s && PRESET_MODELS.indexOf(s) === -1; });
+      extra.value = custom.join(', ');
+      syncEpModels(row);
+    }
     document.addEventListener('change', function (e) {
       var ck = e.target.closest('.ep-res-check input');
-      if (!ck) return;
-      var row = ck.closest('.endpoint-row');
-      if (row) syncEpRes(row);
+      if (ck) {
+        var row = ck.closest('.endpoint-row');
+        if (row) syncEpRes(row);
+        return;
+      }
+      var mc = e.target.closest('.ep-model-check input');
+      if (mc) {
+        var row2 = mc.closest('.endpoint-row');
+        if (row2) syncEpModels(row2);
+      }
     });
+    document.addEventListener('input', function (e) {
+      var extra = e.target.classList && e.target.classList.contains('ep-extra-models');
+      if (!extra) return;
+      var row = e.target.closest('.endpoint-row');
+      if (row) syncEpModels(row);
+    });
+    // 初始化既有行：回填自定义模型并同步隐藏字段
+    Array.prototype.slice.call(rows.querySelectorAll('.endpoint-row')).forEach(initEpModels);
 
     var addBtn = document.getElementById('addEndpoint');
     if (addBtn) {
