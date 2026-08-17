@@ -241,9 +241,14 @@ func isLoginLocked(key string) bool {
 func recordLoginFail(key string) {
 	loginGuard.Lock()
 	defer loginGuard.Unlock()
-	// 只保留仍处于锁定中的条目，防止失败地址无限累积内存
 	now := time.Now()
+	// 只保留仍处于锁定中的条目，防止失败地址无限累积内存。
+	// 当前 key 的累计计数不在清理范围内——若每次失败都被删掉，
+	// 计数永远到不了阈值，锁定永远不会触发。
 	for k, f := range loginGuard.fails {
+		if k == key {
+			continue
+		}
 		if !(f.count >= loginMaxAttempts && now.Before(f.until)) {
 			delete(loginGuard.fails, k)
 		}
@@ -255,7 +260,8 @@ func recordLoginFail(key string) {
 	}
 	f.count++
 	if f.count >= loginMaxAttempts {
-		f.until = time.Now().Add(loginLockWindow)
+		f.until = now.Add(loginLockWindow)
+		log.Printf("login brute-force locked: ip=%s block=%s", key, loginLockWindow)
 	}
 }
 
@@ -263,6 +269,57 @@ func clearLoginFails(key string) {
 	loginGuard.Lock()
 	defer loginGuard.Unlock()
 	delete(loginGuard.fails, key)
+}
+
+// 通用防爆破：按 IP 的滑动窗口限流，覆盖登录/注册/兑换/改密等敏感 POST
+// 接口。登录接口除本限流外，另有独立的 5 次失败锁定 10 分钟机制
+// （loginMaxAttempts / loginLockWindow）。
+const (
+	rateLimitWindow = time.Minute
+	rateLimitPerIP  = 10 // 每个 IP 每分钟允许的敏感请求数
+)
+
+var rateLimiter = struct {
+	sync.Mutex
+	hits map[string][]time.Time
+}{hits: make(map[string][]time.Time)}
+
+// allowRateLimit 对 key（客户端 IP）做滑动窗口计数：窗口内已达上限返回
+// false；过期时间戳会被清除，空桶删除以防内存无限增长。
+func allowRateLimit(key string, limit int, window time.Duration) bool {
+	rateLimiter.Lock()
+	defer rateLimiter.Unlock()
+	now := time.Now()
+	cutoff := now.Add(-window)
+	list := rateLimiter.hits[key]
+	kept := list[:0]
+	for _, t := range list {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) < limit {
+		rateLimiter.hits[key] = append(kept, now)
+		return true
+	}
+	if len(kept) == 0 {
+		delete(rateLimiter.hits, key)
+	} else {
+		rateLimiter.hits[key] = kept
+	}
+	return false
+}
+
+// rateLimited 包裹敏感接口：POST 请求按 IP 限流，超限返回 429。
+func rateLimited(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && !allowRateLimit(clientIP(r), rateLimitPerIP, rateLimitWindow) {
+			log.Printf("rate limited: ip=%s path=%s", clientIP(r), r.URL.Path)
+			http.Error(w, "操作过于频繁，请稍后再试", http.StatusTooManyRequests)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func init() {
@@ -314,8 +371,8 @@ func main() {
 	go cleanupLoop()
 
 	http.HandleFunc("/", indexHandler)
-	http.HandleFunc("/login", loginHandler)
-	http.HandleFunc("/register", registerHandler)
+	http.HandleFunc("/login", rateLimited(loginHandler))
+	http.HandleFunc("/register", rateLimited(registerHandler))
 	http.HandleFunc("/logout", logoutHandler)
 	http.HandleFunc("/create", authMiddleware(createHandler))
 	http.HandleFunc("/generate", authMiddleware(generateHandler))
@@ -323,7 +380,7 @@ func main() {
 	http.HandleFunc("/profile", authMiddleware(profileHandler))
 	http.HandleFunc("/records", authMiddleware(recordsHandler))
 	http.HandleFunc("/records/delete", authMiddleware(recordDeleteHandler))
-	http.HandleFunc("/redeem", authMiddleware(redeemHandler))
+	http.HandleFunc("/redeem", authMiddleware(rateLimited(redeemHandler)))
 	http.HandleFunc("/checkin", authMiddleware(checkinHandler))
 	http.HandleFunc("/points", authMiddleware(pointsHandler))
 	http.HandleFunc("/leaderboard", leaderboardHandler)
@@ -333,10 +390,10 @@ func main() {
 	http.HandleFunc("/admin/notice/add", authMiddleware(adminMiddleware(adminNoticeAddHandler)))
 	http.HandleFunc("/admin/notice/delete", authMiddleware(adminMiddleware(adminNoticeDeleteHandler)))
 	http.HandleFunc("/admin/notice/toggle", authMiddleware(adminMiddleware(adminNoticeToggleHandler)))
-	http.HandleFunc("/password", authMiddleware(passwordHandler))
+	http.HandleFunc("/password", authMiddleware(rateLimited(passwordHandler)))
 	http.HandleFunc("/auth/linuxdo", linuxdoHandler)
 	http.HandleFunc("/auth/linuxdo/callback", linuxdoCallbackHandler)
-	http.HandleFunc("/auth/linuxdo/setup", linuxdoSetupHandler)
+	http.HandleFunc("/auth/linuxdo/setup", rateLimited(linuxdoSetupHandler))
 	http.Handle("/images/", http.StripPrefix("/images/", http.FileServer(http.Dir("data/images"))))
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/admin/users", authMiddleware(adminMiddleware(adminUsersHandler)))

@@ -133,6 +133,68 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
+// TestLoginLockout 验证登录失败锁定：连续失败达到阈值后锁定，
+// 期间拒绝登录；成功登录后解除锁定。
+func TestLoginLockout(t *testing.T) {
+	key := "203.0.113.5"
+	for i := 0; i < loginMaxAttempts; i++ {
+		if isLoginLocked(key) {
+			t.Fatalf("locked too early at attempt %d", i+1)
+		}
+		recordLoginFail(key)
+	}
+	if !isLoginLocked(key) {
+		t.Fatal("should be locked after threshold failures")
+	}
+	clearLoginFails(key)
+	if isLoginLocked(key) {
+		t.Fatal("should be unlocked after success")
+	}
+	// 其他 IP 不受影响
+	if isLoginLocked("198.51.100.3") {
+		t.Fatal("unrelated IP should not be locked")
+	}
+}
+
+// TestRateLimit 验证按 IP 的滑动窗口限流：同 IP 超限后敏感 POST 返回 429，
+// 其他 IP 不受影响，GET 请求不计数。
+func TestRateLimit(t *testing.T) {
+	h := rateLimited(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	post := func(ip string) int {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, "/", nil)
+		rr.RemoteAddr = ip
+		h(ww, rr)
+		return ww.Code
+	}
+	for i := 0; i < rateLimitPerIP; i++ {
+		if code := post("203.0.113.9:1234"); code != http.StatusOK {
+			t.Fatalf("request %d blocked early: %d", i+1, code)
+		}
+	}
+	if code := post("203.0.113.9:1234"); code != http.StatusTooManyRequests {
+		t.Errorf("over-limit request = %d, want 429", code)
+	}
+	if code := post("198.51.100.7:1"); code != http.StatusOK {
+		t.Errorf("other IP should pass, got %d", code)
+	}
+	// GET 不计入限流
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr.RemoteAddr = "203.0.113.9:1234"
+	h(ww, rr)
+	if ww.Code != http.StatusOK {
+		t.Errorf("GET should bypass limiter, got %d", ww.Code)
+	}
+	// 窗口过期后恢复
+	rateLimiter.Lock()
+	delete(rateLimiter.hits, "203.0.113.9")
+	rateLimiter.Unlock()
+	if code := post("203.0.113.9:1234"); code != http.StatusOK {
+		t.Errorf("fresh window should allow, got %d", code)
+	}
+}
+
 func TestConsumeTokenFlow(t *testing.T) {
 	w := httptest.NewRecorder()
 	r1 := httptest.NewRequest(http.MethodGet, "/create", nil)
