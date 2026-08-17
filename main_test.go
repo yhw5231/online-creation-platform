@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -921,5 +923,154 @@ func TestRedeemCodeTypes(t *testing.T) {
 	models.DB.QueryRow("SELECT COUNT(*) FROM users WHERE username IN ('gooduser1','gooduser2')").Scan(&users)
 	if users != 2 {
 		t.Errorf("registered users = %d, want 2", users)
+	}
+}
+
+// TestRedeemCodeBatchAndRemark 验证兑换码管理页的批量能力：
+// 生成时备注写入、列表展示生成时间与备注、批量备注/批量作废（逗号分隔 ids）、
+// 页面包含批量选择与复制控件。
+func TestRedeemCodeBatchAndRemark(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "batch.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	// 管理会话 + CSRF
+	w := httptest.NewRecorder()
+	r0 := httptest.NewRequest(http.MethodGet, "/admin/redeem-codes", nil)
+	csrf := csrfToken(w, r0)
+	cookie := w.Header().Get("Set-Cookie")
+
+	// 批量生成 2 个注册码，并带统一备注
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodPost, "/admin/redeem-codes/generate", strings.NewReader(url.Values{
+		"_csrf":  {csrf},
+		"kind":   {"register"},
+		"points": {"0"},
+		"count":  {"2"},
+		"remark": {"渠道A-5月活动"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", cookie)
+	adminGenerateRedeemCodesHandler(ww, rr)
+	if ww.Code != http.StatusOK {
+		t.Fatalf("generate status = %d, body=%s", ww.Code, ww.Body.String())
+	}
+	body := ww.Body.String()
+	// 生成结果与列表页应包含备注、批量选择、复制与生成时间控件
+	for _, want := range []string{"渠道A-5月活动", "全选本页", "复制选中（含物品名）", "复制选中（仅码）", "生成时间", "批量作废", "code-check"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("generated page missing %q", want)
+		}
+	}
+
+	// 数据库校验：备注已入库、生成时间已填充
+	var id1, id2 int64
+	rows, err := models.DB.Query("SELECT id, remark, created_at FROM redeem_codes WHERE kind='register' ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for rows.Next() {
+		var id int64
+		var remark string
+		var created sql.NullTime
+		if rows.Scan(&id, &remark, &created) != nil {
+			continue
+		}
+		n++
+		if remark != "渠道A-5月活动" {
+			t.Errorf("code %d remark = %q, want 渠道A-5月活动", id, remark)
+		}
+		if !created.Valid || created.Time.IsZero() {
+			t.Errorf("code %d created_at not populated", id)
+		}
+		if id1 == 0 {
+			id1 = id
+		} else {
+			id2 = id
+		}
+	}
+	rows.Close()
+	if n != 2 || id1 == 0 || id2 == 0 {
+		t.Fatalf("expected 2 codes with ids, got %d (id1=%d id2=%d)", n, id1, id2)
+	}
+
+	// 批量备注：两个码一次更新为新备注
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/admin/redeem-codes/remark", strings.NewReader(url.Values{
+		"_csrf":  {csrf},
+		"ids":    {fmt.Sprintf("%d,%d", id1, id2)},
+		"remark": {"渠道B-六月"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", cookie)
+	adminRemarkRedeemCodesHandler(ww, rr)
+	if ww.Code != http.StatusSeeOther {
+		t.Fatalf("batch remark status = %d", ww.Code)
+	}
+	var cnt int
+	models.DB.QueryRow("SELECT COUNT(*) FROM redeem_codes WHERE id IN (?,?) AND remark='渠道B-六月'", id1, id2).Scan(&cnt)
+	if cnt != 2 {
+		t.Errorf("batch remark applied to %d codes, want 2", cnt)
+	}
+
+	// 无 ids 的备注请求应拒绝并提示（不崩溃）
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/admin/redeem-codes/remark", strings.NewReader(url.Values{
+		"_csrf":  {csrf},
+		"remark": {"无目标"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", cookie)
+	adminRemarkRedeemCodesHandler(ww, rr)
+	if ww.Code != http.StatusSeeOther {
+		t.Errorf("empty ids remark status = %d, want 303 redirect", ww.Code)
+	}
+
+	// 批量作废：逗号分隔 ids 一次作废两个
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/admin/redeem-codes/void", strings.NewReader(url.Values{
+		"_csrf": {csrf},
+		"ids":   {fmt.Sprintf("%d,%d", id1, id2)},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", cookie)
+	adminVoidRedeemCodeHandler(ww, rr)
+	if ww.Code != http.StatusSeeOther {
+		t.Fatalf("batch void status = %d", ww.Code)
+	}
+	models.DB.QueryRow("SELECT COUNT(*) FROM redeem_codes WHERE id IN (?,?) AND status='void'", id1, id2).Scan(&cnt)
+	if cnt != 2 {
+		t.Errorf("batch voided %d codes, want 2", cnt)
+	}
+
+	// 列表页展示生成时间与备注（备注保留最新值）
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodGet, "/admin/redeem-codes", nil)
+	rr.Header.Set("Cookie", cookie)
+	adminRedeemCodesHandler(ww, rr)
+	if ww.Code != http.StatusOK {
+		t.Fatalf("list status = %d", ww.Code)
+	}
+	body = ww.Body.String()
+	if !strings.Contains(body, "渠道B-六月") {
+		t.Error("list should show latest remark")
+	}
+	if !strings.Contains(body, "生成时间") || !strings.Contains(body, "备注") {
+		t.Error("list should show 生成时间 and 备注 columns")
+	}
+	// 列表中每行都有可独立保存备注的表单控件
+	if !strings.Contains(body, "remark-form") {
+		t.Error("list should include per-row remark forms")
 	}
 }

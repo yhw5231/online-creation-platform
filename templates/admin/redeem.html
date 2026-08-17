@@ -12,7 +12,7 @@
     <div class="card-body p-4">
         <form method="POST" action="/admin/redeem-codes/generate" class="row g-3" data-submit="loading">
             <input type="hidden" name="_csrf" value="{{.CSRF}}">
-            <div class="col-md-3">
+            <div class="col-md-2">
                 <label class="form-label fw-semibold">码类型</label>
                 <div class="btn-group w-100" role="group">
                     <input type="radio" class="btn-check" name="kind" id="kindPoints" value="points" {{if ne .NewKind "register"}}checked{{end}}>
@@ -21,16 +21,22 @@
                     <label class="btn btn-outline-primary" for="kindRegister">注册码</label>
                 </div>
             </div>
-            <div class="col-md-3" id="pointsField">
+            <div class="col-md-2" id="pointsField">
                 <label class="form-label fw-semibold">单码积分数</label>
                 <input type="number" name="points" class="form-control" value="{{if .NewPoints}}{{.NewPoints}}{{else}}10{{end}}" min="1" required>
                 <div class="form-text">用户凭码兑换多少积分</div>
             </div>
-            <div class="col-md-3">
+            <div class="col-md-2">
                 <label class="form-label fw-semibold">生成数量</label>
                 <input type="number" name="count" class="form-control" value="{{if .NewCodes}}{{len .NewCodes}}{{else}}1{{end}}" min="1" max="100" required>
                 <div class="form-text">单次最多 100 个，码长 32 位</div>
-            </div>            <div class="col-md-3 d-flex align-items-end">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label fw-semibold">备注（可选）</label>
+                <input type="text" name="remark" class="form-control" value="{{.NewRemark}}" maxlength="100" placeholder="如：渠道A / 5月活动">
+                <div class="form-text">整批码统一备注，方便区分</div>
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
                 <button type="submit" class="btn btn-primary w-100 btn-loading" data-loading-text="生成中...">
                     <span>批量生成</span>
                 </button>
@@ -41,7 +47,7 @@
         <div class="alert alert-success mt-4 mb-0 p-3">
             <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
                 <strong class="fs-6">
-                    已生成 {{len .NewCodes}} 个{{if eq .NewKind "register"}}注册码{{else}}积分兑换码（每个 {{.NewPoints}} 积分）{{end}}
+                    已生成 {{len .NewCodes}} 个{{if eq .NewKind "register"}}注册码{{else}}积分兑换码（每个 {{.NewPoints}} 积分）{{end}}{{if .NewRemark}} · 备注：{{.NewRemark}}{{end}}
                 </strong>
                 <button type="button" class="btn btn-success" id="bulkCopyBtn">一键复制全部</button>
             </div>
@@ -70,14 +76,35 @@
             </form>
         </div>
         {{if gt (len .Codes) 0}}
+        <div class="px-3 py-2 border-top d-flex align-items-center flex-wrap gap-2" id="batchToolbar">
+            <span class="form-check mb-0">
+                <input type="checkbox" class="form-check-input" id="checkAll" aria-label="全选">
+                <label class="form-check-label small" for="checkAll">全选本页</label>
+            </span>
+            <span class="badge text-bg-primary" id="selCount">已选 0 个</span>
+            <button type="button" class="btn btn-sm btn-success" id="copySelLine">复制选中（含物品名）</button>
+            <button type="button" class="btn btn-sm btn-outline-success" id="copySelCode">复制选中（仅码）</button>
+            <form method="POST" action="/admin/redeem-codes/remark" class="d-inline-flex gap-1 align-items-center" data-submit="loading" id="batchRemarkForm">
+                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                <input type="hidden" name="ids" id="batchRemarkIds">
+                <input type="text" name="remark" class="form-control form-control-sm" style="width:170px" maxlength="100" placeholder="批量备注内容..." autocomplete="off">
+                <button type="submit" class="btn btn-sm btn-outline-primary btn-loading" data-loading-text="...">批量备注</button>
+            </form>
+            <form method="POST" action="/admin/redeem-codes/void" class="d-inline" data-submit="loading" id="batchVoidForm">
+                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                <input type="hidden" name="ids" id="batchVoidIds">
+                <button type="submit" class="btn btn-sm btn-outline-danger btn-loading" data-loading-text="..." data-confirm="确定批量作废选中的兑换码吗？作废后这些码将无法使用。">批量作废</button>
+            </form>
+        </div>
         <div class="table-responsive">
             <table class="table table-hover app-table mb-0">
                 <thead>
-                    <tr><th>ID</th><th>类型</th><th>兑换码 / 注册码</th><th>状态</th><th>使用者</th><th>使用时间</th><th class="text-end">操作</th></tr>
+                    <tr><th style="width:34px;"></th><th>ID</th><th>类型</th><th>兑换码 / 注册码</th><th>生成时间</th><th>备注</th><th>状态</th><th>使用者</th><th>使用时间</th><th class="text-end">操作</th></tr>
                 </thead>
                 <tbody>
                     {{range .Codes}}
-                    <tr>
+                    <tr data-id="{{.ID}}">
+                        <td><input type="checkbox" class="form-check-input code-check ms-1" data-code="{{.Code}}" data-line="{{.CopyText}}" aria-label="选择"></td>
                         <td class="text-muted">{{.ID}}</td>
                         <td>
                             {{if eq .Kind "register"}}<span class="badge text-bg-info">注册码</span>
@@ -87,6 +114,15 @@
                         <td>
                             <code class="redeem-code">{{.Code}}</code>
                             <button type="button" class="btn btn-sm btn-outline-secondary copy-btn ms-1" data-copy="{{.CopyText}}" data-copy-msg="已复制（含物品名）">复制</button>
+                        </td>
+                        <td class="text-muted small">{{if .CreatedAt}}{{.CreatedAt}}{{else}}—{{end}}</td>
+                        <td class="remark-cell">
+                            <form method="POST" action="/admin/redeem-codes/remark" class="d-inline-flex gap-1 align-items-center remark-form" data-submit="loading">
+                                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                <input type="hidden" name="ids" value="{{.ID}}">
+                                <input type="text" name="remark" class="form-control form-control-sm remark-input" value="{{.Remark}}" maxlength="100" placeholder="添加备注" autocomplete="off" style="min-width:110px;">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary btn-loading" data-loading-text="...">存</button>
+                            </form>
                         </td>
                         <td>
                             {{if eq .Status "active"}}<span class="badge text-bg-success">可用</span>
@@ -155,6 +191,106 @@
             var ok = false;
             try { ok = document.execCommand('copy'); } catch (e) {}
             done(ok);
+        });
+    }
+
+    /* ---------- 批量选择 / 复制 / 备注 / 作废 ---------- */
+    var checks = Array.prototype.slice.call(document.querySelectorAll('.code-check'));
+    var selCount = document.getElementById('selCount');
+    var checkAll = document.getElementById('checkAll');
+    var batchRemarkIds = document.getElementById('batchRemarkIds');
+    var batchVoidIds = document.getElementById('batchVoidIds');
+
+    function selected() {
+        return checks.filter(function (c) { return c.checked; });
+    }
+    function refreshCount() {
+        var n = selected().length;
+        if (selCount) selCount.textContent = '已选 ' + n + ' 个';
+        var ids = selected().map(function (c) {
+            return c.closest('tr').getAttribute('data-id');
+        }).join(',');
+        if (batchRemarkIds) batchRemarkIds.value = ids;
+        if (batchVoidIds) batchVoidIds.value = ids;
+    }
+    checks.forEach(function (c) {
+        c.addEventListener('change', function () {
+            if (checkAll) checkAll.checked = checks.length > 0 && selected().length === checks.length;
+            refreshCount();
+        });
+    });
+    if (checkAll) {
+        checkAll.addEventListener('change', function () {
+            checks.forEach(function (c) { c.checked = checkAll.checked; });
+            refreshCount();
+        });
+    }
+    refreshCount();
+
+    function copyBatch(getText) {
+        var sel = selected();
+        if (!sel.length) {
+            window.alert('请先勾选要复制的兑换码');
+            return false;
+        }
+        var text = sel.map(getText).join('\n');
+        var done = function (ok) {
+            if (ok) {
+                window.alert('已复制 ' + sel.length + ' 个码到剪贴板');
+            } else {
+                window.alert('复制失败，请重试');
+            }
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+            return true;
+        }
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+        done(ok);
+        return true;
+    }
+    var copySelLine = document.getElementById('copySelLine');
+    if (copySelLine) {
+        copySelLine.addEventListener('click', function () {
+            copyBatch(function (c) { return c.getAttribute('data-line'); });
+        });
+    }
+    var copySelCode = document.getElementById('copySelCode');
+    if (copySelCode) {
+        copySelCode.addEventListener('click', function () {
+            copyBatch(function (c) { return c.getAttribute('data-code'); });
+        });
+    }
+    var batchRemarkForm = document.getElementById('batchRemarkForm');
+    if (batchRemarkForm) {
+        batchRemarkForm.addEventListener('submit', function (e) {
+            if (!batchRemarkIds || !batchRemarkIds.value) {
+                e.preventDefault();
+                window.alert('请先勾选要备注的兑换码');
+                return;
+            }
+            var remarkInput = batchRemarkForm.querySelector('input[name="remark"]');
+            if (remarkInput && !remarkInput.value.trim()) {
+                e.preventDefault();
+                window.alert('请填写备注内容');
+            }
+        });
+    }
+    var batchVoidForm = document.getElementById('batchVoidForm');
+    if (batchVoidForm) {
+        batchVoidForm.addEventListener('submit', function (e) {
+            if (!batchVoidIds || !batchVoidIds.value) {
+                e.preventDefault();
+                window.alert('请先勾选要作废的兑换码');
+            }
         });
     }
 })();

@@ -405,6 +405,7 @@ func main() {
 	http.HandleFunc("/admin/redeem-codes", authMiddleware(adminMiddleware(adminRedeemCodesHandler)))
 	http.HandleFunc("/admin/redeem-codes/generate", authMiddleware(adminMiddleware(adminGenerateRedeemCodesHandler)))
 	http.HandleFunc("/admin/redeem-codes/void", authMiddleware(adminMiddleware(adminVoidRedeemCodeHandler)))
+	http.HandleFunc("/admin/redeem-codes/remark", authMiddleware(adminMiddleware(adminRemarkRedeemCodesHandler)))
 	http.HandleFunc("/admin/redeem-codes/void-old", authMiddleware(adminMiddleware(adminVoidOldCodesHandler)))
 	http.HandleFunc("/admin/settings", authMiddleware(adminMiddleware(adminSettingsHandler)))
 	http.HandleFunc("/admin/update-settings", authMiddleware(adminMiddleware(adminUpdateSettingsHandler)))
@@ -4023,7 +4024,7 @@ func redeemAdminPage(w http.ResponseWriter, r *http.Request, extra map[string]in
 	if page > totalPages {
 		page = totalPages
 	}
-	rows, err := models.DB.Query("SELECT rc.id, rc.code, rc.points, rc.kind, rc.status, rc.used_by, rc.used_at, COALESCE(u.username,'') FROM redeem_codes rc LEFT JOIN users u ON u.id = rc.used_by"+clause+" ORDER BY rc.id DESC LIMIT ? OFFSET ?", append(args, perPage, (page-1)*perPage)...)
+	rows, err := models.DB.Query("SELECT rc.id, rc.code, rc.points, rc.kind, rc.status, rc.used_by, rc.used_at, COALESCE(u.username,''), rc.created_at, COALESCE(rc.remark,'') FROM redeem_codes rc LEFT JOIN users u ON u.id = rc.used_by"+clause+" ORDER BY rc.id DESC LIMIT ? OFFSET ?", append(args, perPage, (page-1)*perPage)...)
 	if err != nil {
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
@@ -4039,7 +4040,9 @@ func redeemAdminPage(w http.ResponseWriter, r *http.Request, extra map[string]in
 		var usedBy sql.NullInt64
 		var usedAt sql.NullTime
 		var usedByName string
-		if err := rows.Scan(&id, &code, &points, &kind, &status, &usedBy, &usedAt, &usedByName); err != nil {
+		var createdAt sql.NullTime
+		var remark string
+		if err := rows.Scan(&id, &code, &points, &kind, &status, &usedBy, &usedAt, &usedByName, &createdAt, &remark); err != nil {
 			continue
 		}
 		usedByVal := int64(0)
@@ -4049,6 +4052,10 @@ func redeemAdminPage(w http.ResponseWriter, r *http.Request, extra map[string]in
 		usedAtStr := ""
 		if usedAt.Valid {
 			usedAtStr = localTime(usedAt.Time.Format("2006-01-02 15:04:05"))
+		}
+		createdAtStr := ""
+		if createdAt.Valid {
+			createdAtStr = localTime(createdAt.Time.Format("2006-01-02 15:04:05"))
 		}
 		label := redeemCodeLabel(kind, points)
 		codes = append(codes, map[string]interface{}{
@@ -4062,6 +4069,8 @@ func redeemAdminPage(w http.ResponseWriter, r *http.Request, extra map[string]in
 			"UsedBy":     usedByVal,
 			"UsedByName": usedByName,
 			"UsedAt":     usedAtStr,
+			"CreatedAt":  createdAtStr,
+			"Remark":     remark,
 		})
 	}
 	pageBase := "/admin/redeem-codes?"
@@ -4116,6 +4125,10 @@ func adminGenerateRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "单次最多生成 100 个", http.StatusBadRequest)
 		return
 	}
+	remark := strings.TrimSpace(r.FormValue("remark"))
+	if rn := []rune(remark); len(rn) > 100 {
+		remark = string(rn[:100])
+	}
 	var points int
 	if kind == "points" {
 		points, err = strconv.Atoi(r.FormValue("points"))
@@ -4131,7 +4144,7 @@ func adminGenerateRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 	newCodes := []map[string]interface{}{}
 	for i := 0; i < count; i++ {
 		code := generateRedeemCode()
-		_, err := models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status) VALUES(?,?,?,?,?)", code, points, kind, uid, "active")
+		_, err := models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status, remark) VALUES(?,?,?,?,?,?)", code, points, kind, uid, "active", remark)
 		if err != nil {
 			// 偶发重复则重试；连续冲突过多（库故障等）时放弃，避免死循环
 			consecFails++
@@ -4154,17 +4167,39 @@ func adminGenerateRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 		"NewBulk":   strings.Join(lines, "\n"),
 		"NewKind":   kind,
 		"NewPoints": points,
+		"NewRemark": remark,
 	})
 }
 
-func adminVoidRedeemCodeHandler(w http.ResponseWriter, r *http.Request) {
+// adminRemarkRedeemCodesHandler 保存备注（单个或批量，ids 逗号分隔），
+// 供管理员区分兑换码/注册码的用途与来源。
+func adminRemarkRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || !verifyCSRF(r) {
 		http.Redirect(w, r, "/admin/redeem-codes", http.StatusSeeOther)
 		return
 	}
-	id := r.FormValue("id")
-	models.DB.Exec("UPDATE redeem_codes SET status='void' WHERE id=? AND status='active'", id)
-	// 作废后回到原来的搜索词与页码，避免管理员重查/翻找
+	ids := splitIDList(r.FormValue("ids"))
+	if len(ids) == 0 {
+		flashRedirect(w, r, redeemAdminTarget(r), "请先选择要备注的兑换码")
+		return
+	}
+	remark := strings.TrimSpace(r.FormValue("remark"))
+	if rn := []rune(remark); len(rn) > 100 {
+		remark = string(rn[:100])
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]interface{}, 0, len(ids)+1)
+	args = append(args, remark)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	models.DB.Exec("UPDATE redeem_codes SET remark=? WHERE id IN ("+ph+")", args...)
+	flashRedirect(w, r, redeemAdminTarget(r), fmt.Sprintf("已为 %d 个码保存备注", len(ids)))
+}
+
+// redeemAdminTarget 从 Referer 还原兑换码管理页的筛选/分页参数，
+// 供备注、作废等操作完成后返回原位置。
+func redeemAdminTarget(r *http.Request) string {
 	target := "/admin/redeem-codes"
 	if ref := r.Referer(); ref != "" {
 		if u, err := url.Parse(ref); err == nil {
@@ -4179,7 +4214,52 @@ func adminVoidRedeemCodeHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	flashRedirect(w, r, target, "已作废该兑换码")
+	return target
+}
+
+// splitIDList 解析逗号分隔的 ID 列表（如 "1,2,3"），忽略空项与非法项。
+func splitIDList(s string) []int64 {
+	var ids []int64
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if id, err := strconv.ParseInt(part, 10, 64); err == nil && id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func adminVoidRedeemCodeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !verifyCSRF(r) {
+		http.Redirect(w, r, "/admin/redeem-codes", http.StatusSeeOther)
+		return
+	}
+	// 支持单个（id）与批量（ids，逗号分隔）作废
+	ids := splitIDList(r.FormValue("ids"))
+	if len(ids) == 0 {
+		if single, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64); err == nil {
+			ids = []int64{single}
+		}
+	}
+	if len(ids) == 0 {
+		flashRedirect(w, r, redeemAdminTarget(r), "请先选择要作废的兑换码")
+		return
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	res, err := models.DB.Exec("UPDATE redeem_codes SET status='void' WHERE id IN ("+ph+") AND status='active'", args...)
+	if err != nil {
+		http.Error(w, "操作失败，请重试", http.StatusInternalServerError)
+		return
+	}
+	n, _ := res.RowsAffected()
+	flashRedirect(w, r, redeemAdminTarget(r), fmt.Sprintf("已作废 %d 个兑换码", n))
 }
 
 // adminVoidOldCodesHandler voids unused codes created more than 30 days ago,
