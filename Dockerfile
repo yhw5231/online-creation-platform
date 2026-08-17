@@ -6,16 +6,18 @@ COPY . .
 RUN go build -o main .
 
 FROM alpine:latest
+# su-exec 用于从 root 降权到应用用户执行主程序
+RUN apk add --no-cache su-exec
 WORKDIR /app
 COPY --from=builder /app/main .
 COPY --from=builder /app/templates ./templates
 COPY --from=builder /app/static ./static
-# 运行时数据目录（SQLite 数据库、生成的图片）：data/ 被 .gitignore 忽略，不会进入构建上下文，
-# 由程序启动时自动创建；此处预创建并定向到 UID 1000，配合 compose bind-mount 的宿主 ./data
-RUN mkdir -p data \
-    # 以非 root 用户运行，降低容器逃逸风险；固定 UID 1000，便于宿主 bind-mount 权限对齐
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# 预创建数据目录并创建非 root 应用用户（UID 1000）
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+    && mkdir -p data \
     && addgroup -S app && adduser -S -G app -u 1000 app \
     && chown -R app:app /app
-USER app
 EXPOSE 8900
-CMD ["./main"]
+# 以 root 启动入口脚本：自愈数据目录权限后自动降权运行（见 entrypoint.sh）
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
