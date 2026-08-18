@@ -110,8 +110,13 @@ TZ=Asia/Shanghai
 ### 3.2 构建并启动
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
+
+> 默认直接拉取 **GitHub Actions 自动构建发布的官方镜像**（`ghcr.io/yhw5231/online-creation-platform`，同时发布 linux/amd64 与 linux/arm64）。
+> 首次会从 GHCR 拉取，之后每次 `docker compose up -d` 都会自动检查并拉取最新镜像（`pull_policy: always`）。
+>
+> 若确需在服务器本地从源码构建（不推荐，升级需手动拉代码+构建）：编辑 `docker-compose.yml`，注释 `image` 行并取消 `build: .` 注释，再执行 `docker compose up -d --build`。
 
 ### 3.3 验证
 
@@ -129,11 +134,11 @@ curl http://127.0.0.1:8900/health
 
 ### 3.4 Docker 方式注意事项
 
-- 数据持久化：`./data`（SQLite 数据库、生成的图片）与 `./static` 为 bind-mount 挂载，**删除容器不会丢数据**。
+- 数据持久化：仅 `./data`（SQLite 数据库、生成的图片）为 bind-mount 挂载，**删除容器不会丢数据**；静态资源与模板已打包进镜像，升级自动同步，无需再挂载 `./static`。
 - 容器以非 root 用户（UID 1000）运行，宿主目录需允许 UID 1000 写入：
   ```bash
-  mkdir -p data static
-  sudo chown -R 1000:1000 data static
+  mkdir -p data
+  sudo chown -R 1000:1000 data
   # 若不处理，日志出现 WARN: cannot persist session key ... 时请显式设置 SESSION_SECRET（见 3.1）
   ```
 - 容器内置健康检查（30s 间隔），`restart: unless-stopped` 保证开机自启与异常自动重启。
@@ -369,20 +374,40 @@ sqlite3 data/creation.db "UPDATE users SET role='admin' WHERE username='目标�
 
 ## 10. 升级更新
 
+### 10.1 半自动：一条命令升级（推荐）
+
+代码推送到 GitHub 后，GitHub Actions 会自动构建新镜像并发布到 GHCR（`latest` + `sha-xxxx` 标签，amd64/arm64）。服务器上只需：
+
 ```bash
 cd online-creation-platform
-
-# 拉取最新代码
-git pull
-
-# Docker 方式
-docker compose up -d --build
-
-# 源码方式
-go build -o app . && sudo systemctl restart online-creation
+docker compose pull    # 拉取最新镜像
+docker compose up -d   # 用新镜像重建容器（数据卷不变，不丢数据）
 ```
 
-> 数据库结构兼容已有数据，升级不丢数据；升级前建议先备份 `data/`（见 9.1）。
+> 因为 compose 配置了 `pull_policy: always`，直接 `docker compose up -d` 也会自动拉取最新镜像，`pull` 可省略。
+
+### 10.2 全自动：Watchtower 自动升级
+
+部署 [Watchtower](https://github.com/containrrr/watchtower) 后，每次 GitHub 推送触发新镜像发布时，Watchtower 会自动拉取并原地重建容器，无需任何手动操作：
+
+```bash
+docker run -d \
+  --name watchtower \
+  --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  containrrr/watchtower --interval 60 --cleanup
+```
+
+> `--interval 60`：每 60 秒检查一次新镜像；`--cleanup`：自动清理旧镜像。
+> 升级前建议先备份 `data/`（见 9.1）。数据库结构兼容已有数据，升级不丢数据。
+
+### 10.3 源码方式部署的升级
+
+```bash
+cd online-creation-platform
+git pull
+go build -o app . && sudo systemctl restart online-creation
+```
 
 ---
 

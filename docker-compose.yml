@@ -1,11 +1,19 @@
 services:
   app:
-    build: .
+    # 直接使用 GitHub Actions 自动构建发布的镜像（ghcr.io）。
+    # 升级方式：docker compose pull && docker compose up -d（或直接 up -d，见 pull_policy）。
+    # 如需在服务器本地从源码构建（不推荐），把下面 image 行注释掉并取消 build 行注释：
+    #   docker compose up -d --build
+    image: ghcr.io/yhw5231/online-creation-platform:latest
+    # build: .
+    # 每次 up -d / pull 都强制拉取最新镜像，确保升级即时生效
+    pull_policy: always
     ports:
       - "8900:8900"
     volumes:
+      # 仅数据目录为持久卷（数据库 + 生成的图片）；
+      # 静态资源与模板已打包进镜像，升级时自动同步，不再 bind-mount ./static
       - ./data:/app/data
-      - ./static:/app/static
     environment:
       - TZ=Asia/Shanghai
     healthcheck:

@@ -30,12 +30,16 @@ cd online-creation-platform
 ### 2. Docker 部署（推荐）
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
-服务运行在 `8900` 端口，数据保存在 `./data`，静态资源挂载自 `./static`。
+服务运行在 `8900` 端口，数据保存在 `./data`。
 
-> 容器以非 root 用户（UID 1000）运行；./data 与 ./static 为 bind-mount，宿主目录需允许 UID 1000 写入，否则日志会出现 WARN: cannot persist session key ... using in-memory key（会话密钥改用内存密钥，建议显式设置 SESSION_SECRET）。
+> 默认直接拉取 **GitHub Actions 自动构建发布的官方镜像**（ghcr.io，amd64/arm64），
+> 代码推送到仓库后镜像自动重新构建，服务器执行 `docker compose pull && docker compose up -d` 即可升级
+> （也可用 Watchtower 实现全自动升级，详见 [docs/deployment.md](docs/deployment.md) 第 10 节）。
+
+> 容器以非 root 用户（UID 1000）运行；./data 为 bind-mount，宿主目录需允许 UID 1000 写入，否则日志会出现 WARN: cannot persist session key ... using in-memory key（会话密钥改用内存密钥，建议显式设置 SESSION_SECRET）。
 
 ### 3. 源码运行（本地开发）
 
