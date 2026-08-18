@@ -129,8 +129,10 @@ jobs:
           cd dist
           ls -lh
           # 首次发布：创建 Release 并上传附件与中文发布说明；
+          # 标题固定为版本号（如 v1.2.0），改动详情写在发布说明正文；
           # tag 已存在（重跑）时改为只上传附件
           gh release create "${GITHUB_REF_NAME}" ./* \
             --repo "${{ github.repository }}" \
+            --title "${GITHUB_REF_NAME}" \
             --notes-file "${NOTES_FILE}" \
             || gh release upload "${GITHUB_REF_NAME}" ./* --repo "${{ github.repository }}"
