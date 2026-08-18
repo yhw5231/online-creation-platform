@@ -427,6 +427,7 @@ func main() {
 	http.HandleFunc("/admin/redeem-codes/remark", authMiddleware(adminMiddleware(adminRemarkRedeemCodesHandler)))
 	http.HandleFunc("/admin/redeem-codes/void-old", authMiddleware(adminMiddleware(adminVoidOldCodesHandler)))
 	http.HandleFunc("/admin/settings", authMiddleware(adminMiddleware(adminSettingsHandler)))
+	http.HandleFunc("/admin/logs", authMiddleware(adminMiddleware(adminSystemLogsHandler)))
 	http.HandleFunc("/admin/update-settings", authMiddleware(adminMiddleware(adminUpdateSettingsHandler)))
 	http.HandleFunc("/admin/reset-settings", authMiddleware(adminMiddleware(adminResetSettingsHandler)))
 	http.HandleFunc("/admin/check-update", authMiddleware(adminMiddleware(adminCheckUpdateHandler)))
@@ -592,7 +593,6 @@ func renderHome(w http.ResponseWriter, r *http.Request) {
 		"Points":       0,
 		"Username":     "",
 		"SiteName":     siteName(),
-		"SiteNotice":   siteNotice(),
 		"OAuthEnabled": oauthEnabled(),
 		"Showcase":     showcase,
 		"CSRF":         csrfToken(w, r),
@@ -645,7 +645,6 @@ func renderError(w http.ResponseWriter, r *http.Request, code, message string) {
 		"Points":       userPoints(uid),
 		"Username":     username,
 		"SiteName":     siteName(),
-		"SiteNotice":   siteNotice(),
 		"Toast":        consumeFlash(w, r),
 		"Content":      "content-404",
 	}
@@ -709,27 +708,44 @@ func oauthEnabled() bool {
 	return strings.TrimSpace(clientID) != ""
 }
 
-// siteNotice returns the latest active announcement text ("" when disabled).
-// 公告统一由 notices 表管理（多条，含历史），不再兼容旧版 site_notice 单条配置。
-func siteNotice() string {
-	var title, content string
-	err := models.DB.QueryRow("SELECT title, content FROM notices WHERE is_active=1 ORDER BY id DESC LIMIT 1").Scan(&title, &content)
-	if err != nil {
-		return ""
+// unreadNotices reports whether the user has unread (newer) announcements:
+// true when at least one active notice is newer than the user's last-read id.
+// The nav bar then shows a red dot on the 公告 entry.
+func unreadNotices(userID int64) bool {
+	if userID <= 0 {
+		return false
 	}
-	t := strings.TrimSpace(title)
-	c := strings.TrimSpace(content)
-	if t != "" && c != "" {
-		return t + "：" + c
+	var latest int64
+	if models.DB.QueryRow("SELECT MAX(id) FROM notices WHERE is_active=1").Scan(&latest) != nil || latest == 0 {
+		return false
 	}
-	if c != "" {
-		return c
+	var read int64
+	if models.DB.QueryRow("SELECT last_read_notice_id FROM users WHERE id=?", userID).Scan(&read) != nil {
+		return false
 	}
-	return t
+	return latest > read
+}
+
+// markNoticesRead advances the user's read position to the latest active
+// notice, clearing the nav red dot. Called when the user views /notices.
+func markNoticesRead(userID int64) {
+	if userID <= 0 {
+		return
+	}
+	var latest int64
+	if models.DB.QueryRow("SELECT MAX(id) FROM notices WHERE is_active=1").Scan(&latest) != nil || latest == 0 {
+		return
+	}
+	models.DB.Exec("UPDATE users SET last_read_notice_id=? WHERE id=? AND last_read_notice_id<?", latest, userID, latest)
 }
 
 // noticesHandler 展示全部启用公告（含历史），用户可查看公告列表。
+// 登录用户访问本页即视为已读全部公告，导航“公告”红点随之消失。
 func noticesHandler(w http.ResponseWriter, r *http.Request) {
+	uid, _, _ := currentUser(r)
+	if uid > 0 {
+		markNoticesRead(uid)
+	}
 	rows, err := models.DB.Query("SELECT id, title, content, created_at FROM notices WHERE is_active=1 ORDER BY id DESC")
 	if err != nil {
 		renderError(w, r, "500", "公告加载失败")
@@ -849,7 +865,6 @@ func renderPublicPage(w http.ResponseWriter, r *http.Request, title, content str
 		"Points":     int(userPoints(uid)),
 		"Username":   username,
 		"SiteName":   siteName(),
-		"SiteNotice": siteNotice(),
 		"CSRF":       csrfToken(w, r),
 		"Content":    content,
 	}
@@ -857,6 +872,7 @@ func renderPublicPage(w http.ResponseWriter, r *http.Request, title, content str
 		data[k] = v
 	}
 	data["CheckinAvailable"] = uid > 0 && checkinAvailable(uid)
+	data["UnreadNotices"] = unreadNotices(uid)
 	data["Toast"] = consumeFlash(w, r)
 	noStore(w)
 	if err := tpl.ExecuteTemplate(w, "layout.html", data); err != nil {
@@ -1007,10 +1023,12 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 			Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Status)
 		if err != nil || user.Status != 1 || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
 			recordLoginFail(key)
+			systemLog(r, 0, username, "login_fail", "用户名或密码错误", 0)
 			renderLogin(w, r, "用户名或密码错误", next, username)
 			return
 		}
 		clearLoginFails(key)
+		systemLog(r, user.ID, user.Username, "login", "登录成功", 0)
 		// 登录成功后重置会话，防止会话固定攻击
 		session := rotateSession(w, r)
 		session.Values["userID"] = user.ID
@@ -1036,7 +1054,6 @@ func renderLogin(w http.ResponseWriter, r *http.Request, errMsg, next, lastUser 
 		"Points":       0,
 		"LastUsername": lastUser,
 		"SiteName":     siteName(),
-		"SiteNotice":   siteNotice(),
 		"OAuthEnabled": oauthEnabled(),
 		"Next":         next,
 		"CSRF":         csrfToken(w, r),
@@ -1064,7 +1081,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	pwReg, _ := models.GetConfig("enable_password_registration")
 	if pwReg != "true" {
-		renderRegister(w, r, "用户名密码注册已关闭，请通过第三方账号登录", next, "")
+		renderRegister(w, r, "用户名密码注册已关闭，请通过第三方账号登录", "", next, "")
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -1079,20 +1096,20 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		password := r.FormValue("password")
 		regCode := strings.ToUpper(strings.TrimSpace(r.FormValue("reg_code")))
 		if len(username) < 2 || len(username) > 32 {
-			renderRegister(w, r, "用户名长度需在 2-32 个字符之间", next, username)
+			renderRegister(w, r, "用户名长度需在 2-32 个字符之间", "", next, username)
 			return
 		}
 		if len(password) < 6 {
-			renderRegister(w, r, "密码长度至少 6 位", next, username)
+			renderRegister(w, r, "密码长度至少 6 位", "", next, username)
 			return
 		}
 		if r.FormValue("confirm_password") != password {
-			renderRegister(w, r, "两次输入的密码不一致", next, username)
+			renderRegister(w, r, "两次输入的密码不一致", "", next, username)
 			return
 		}
 		requireCode, _ := models.GetConfig("require_reg_code")
 		if requireCode == "true" && regCode == "" {
-			renderRegister(w, r, "请输入注册码", next, username)
+			renderRegister(w, r, "", "请输入注册码", next, username)
 			return
 		}
 		hashed, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -1110,7 +1127,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 				username, string(hashed), initialPoints, "user", 1)
 			if err != nil {
 				tx.Rollback()
-				renderRegister(w, r, "用户名已存在或输入有误", next, username)
+				renderRegister(w, r, "用户名已存在或输入有误", "", next, username)
 				return
 			}
 			uid, _ := res.LastInsertId()
@@ -1123,7 +1140,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 			if n, _ := res2.RowsAffected(); n == 0 {
 				// 注册码已被他人占用：回滚账号创建，不产生垃圾用户
 				tx.Rollback()
-				renderRegister(w, r, "注册码无效或已被使用", next, username)
+				renderRegister(w, r, "", "注册码无效或已被使用", next, username)
 				return
 			}
 			if err := tx.Commit(); err != nil {
@@ -1133,6 +1150,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 			if initialPoints > 0 {
 				logPoints(uid, int64(initialPoints), "注册赠送")
 			}
+			systemLog(r, uid, username, "register", "注册成功（凭注册码）", int64(initialPoints))
 			if next == "" {
 				next = "/login"
 			} else {
@@ -1145,14 +1163,15 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		_, err := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)",
 			username, string(hashed), initialPoints, "user", 1)
 		if err != nil {
-			renderRegister(w, r, "用户名已存在或输入有误", next, username)
+			renderRegister(w, r, "用户名已存在或输入有误", "", next, username)
 			return
 		}
+		var uid int64
+		models.DB.QueryRow("SELECT id FROM users WHERE username=?", username).Scan(&uid)
 		if initialPoints > 0 {
-			var uid int64
-			models.DB.QueryRow("SELECT id FROM users WHERE username=?", username).Scan(&uid)
 			logPoints(uid, int64(initialPoints), "注册赠送")
 		}
+		systemLog(r, uid, username, "register", "注册成功", int64(initialPoints))
 		if next == "" {
 			next = "/login"
 		} else {
@@ -1161,22 +1180,25 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		flashRedirect(w, r, next, "注册成功，请登录")
 		return
 	}
-	renderRegister(w, r, "", next, "")
+	renderRegister(w, r, "", "", next, "")
 }
 
-func renderRegister(w http.ResponseWriter, r *http.Request, errMsg, next, lastUser string) {
+// renderRegister 渲染注册页：errMsg（用户名/密码等）显示在表单顶部，
+// regCodeErr（注册码问题）以红色文字显示在注册码输入框下方；出错时重渲染
+// 注册页本身，不跳转到其它页面。
+func renderRegister(w http.ResponseWriter, r *http.Request, errMsg, regCodeErr, next, lastUser string) {
 	noStore(w)
 	reqCode, _ := models.GetConfig("require_reg_code")
 	err := tpl.ExecuteTemplate(w, "layout.html", map[string]interface{}{
 		"Title":          "注册",
 		"Error":          errMsg,
+		"RegCodeError":   regCodeErr,
 		"IsAdmin":        false,
 		"IsLoggedIn":     false,
 		"Points":         0,
 		"RequireRegCode": reqCode == "true",
 		"LastUsername":   lastUser,
 		"SiteName":       siteName(),
-		"SiteNotice":     siteNotice(),
 		"Next":           next,
 		"CSRF":           csrfToken(w, r),
 		"Toast":          consumeFlash(w, r),
@@ -1193,10 +1215,15 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session, _ := store.Get(r, "session")
+	uid, _ := session.Values["userID"].(int64)
+	uname, _ := session.Values["username"].(string)
 	session.Values["userID"] = nil
 	session.Values["username"] = nil
 	session.Values["role"] = nil
 	session.Save(r, w)
+	if uid > 0 {
+		systemLog(r, uid, uname, "logout", "退出登录", 0)
+	}
 	flashRedirect(w, r, "/login", "已退出登录")
 }
 
@@ -1267,6 +1294,38 @@ func logPoints(uid, delta int64, desc string) {
 	var balance int64
 	models.DB.QueryRow("SELECT points FROM users WHERE id=?", uid).Scan(&balance)
 	models.DB.Exec("INSERT INTO points_log(user_id, delta, balance, description) VALUES(?,?,?,?)", uid, delta, balance, desc)
+}
+
+// systemLogActions 行为的中文名（管理后台日志筛选下拉与列表展示共用）。
+var systemLogActions = map[string]string{
+	"login":        "登录",
+	"login_fail":   "登录失败",
+	"logout":       "退出登录",
+	"register":     "注册",
+	"checkin":      "签到",
+	"create":       "创作",
+	"redeem":       "兑换",
+	"api":          "API 调用",
+	"admin_rename": "管理员操作",
+}
+
+// systemLogActionLabel 返回行为的中文名，未知行为原样返回。
+func systemLogActionLabel(action string) string {
+	if v, ok := systemLogActions[action]; ok {
+		return v
+	}
+	return action
+}
+
+// systemLog 写入一条系统日志（用户行为审计）：时间、用户名、行为、详情、积分
+// 变动、IP 均记录，管理后台 /admin/logs 支持逐项筛选。r 可为 nil（无请求时）。
+func systemLog(r *http.Request, userID int64, username, action, detail string, pointsDelta int64) {
+	ip := ""
+	if r != nil {
+		ip = clientIP(r)
+	}
+	models.DB.Exec("INSERT INTO system_logs(user_id, username, action, detail, points_delta, ip) VALUES(?,?,?,?,?,?)",
+		userID, username, action, detail, pointsDelta, ip)
 }
 
 // profileHandler renders a personal account overview: balances, statistics,
@@ -1385,7 +1444,7 @@ func renderPage(w http.ResponseWriter, r *http.Request, templateName string, dat
 	data["CSRF"] = csrfToken(w, r)
 	// 导航角标：今天还未签到且签到功能开启时给“每日签到”加提示点
 	data["CheckinAvailable"] = uid > 0 && checkinAvailable(uid)
-	data["SiteNotice"] = siteNotice()
+	data["UnreadNotices"] = unreadNotices(uid)
 	data["Toast"] = consumeFlash(w, r)
 	err := tpl.ExecuteTemplate(w, templateName, data)
 	if err != nil {
@@ -1537,7 +1596,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		flashRedirect(w, r, "/create", "请勿重复提交，本次未扣分")
 		return
 	}
-	userID, _, _ := currentUser(r)
+	userID, username, _ := currentUser(r)
 	baseCost := generationCost()
 
 	// 提前读取表单值，便于回显给用户
@@ -1692,6 +1751,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	rid, _ := res.LastInsertId()
 	logPoints(userID, -int64(cost), "AI 图片创作消耗")
+	systemLog(r, userID, username, "create", fmt.Sprintf("创作生成 %d 张（%s），任务 #%d", n, chanModel, rid), -int64(cost))
 
 	// 入队：worker 异步生成，前端轮询 /generate/status 同步任务状态
 	taskQueue <- genTask{recordID: rid}
@@ -2563,12 +2623,16 @@ func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	flashRedirect(w, r, target, "已删除该创作记录")
 }
 
-func renderRedeem(w http.ResponseWriter, r *http.Request, msg, msgType string) {
+// renderRedeem 渲染积分兑换页。错误（msgType=="error"）以红色文字显示在兑换码
+// 输入框下方，成功（"success"）以绿色提示条显示在顶部；始终停留在兑换页本身，
+// 不跳转其它页面。code 用于出错时回填输入框，避免用户重输 32 位兑换码。
+func renderRedeem(w http.ResponseWriter, r *http.Request, msg, msgType, code string) {
 	userID, _, _ := currentUser(r)
 	data := map[string]interface{}{
 		"Title":       "积分兑换",
 		"Message":     msg,
 		"MessageType": msgType,
+		"Code":        code,
 		"History":     redeemHistory(userID),
 		"Content":     "content-redeem",
 	}
@@ -2596,7 +2660,7 @@ func redeemHistory(userID int64) []map[string]interface{} {
 }
 
 func redeemHandler(w http.ResponseWriter, r *http.Request) {
-	userID, _, _ := currentUser(r)
+	userID, username, _ := currentUser(r)
 	if r.Method == http.MethodPost {
 		if !verifyCSRF(r) {
 			renderError(w, r, "400", "表单已过期，请刷新页面后重试")
@@ -2604,13 +2668,17 @@ func redeemHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		code := strings.ToUpper(strings.TrimSpace(r.FormValue("code")))
 		if code == "" || len(code) > 32 {
-			renderRedeem(w, r, "兑换码无效或已被使用", "error")
+			msg := "兑换码无效或已被使用"
+			if code == "" {
+				msg = "请输入兑换码"
+			}
+			renderRedeem(w, r, msg, "error", code)
 			return
 		}
 		var points int64
 		err := models.DB.QueryRow("SELECT points FROM redeem_codes WHERE code=? AND status='active' AND (kind='' OR kind='points')", code).Scan(&points)
 		if err != nil {
-			renderRedeem(w, r, "兑换码无效或已被使用", "error")
+			renderRedeem(w, r, "兑换码无效或已被使用", "error", code)
 			return
 		}
 		tx, err := models.DB.Begin()
@@ -2632,7 +2700,7 @@ func redeemHandler(w http.ResponseWriter, r *http.Request) {
 		if n, _ := res2.RowsAffected(); n == 0 {
 			// 并发下已被其他请求兑换：整体回滚，绝不重复发放积分
 			tx.Rollback()
-			renderRedeem(w, r, "兑换码已被使用", "error")
+			renderRedeem(w, r, "兑换码已被使用", "error", code)
 			return
 		}
 		if err := tx.Commit(); err != nil {
@@ -2640,10 +2708,11 @@ func redeemHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logPoints(userID, points, "兑换码兑换获得")
-		renderRedeem(w, r, fmt.Sprintf("兑换成功，获得 %d 积分", points), "success")
+		systemLog(r, userID, username, "redeem", fmt.Sprintf("兑换 %d 积分", points), points)
+		renderRedeem(w, r, fmt.Sprintf("兑换成功，获得 %d 积分", points), "success", "")
 		return
 	}
-	renderRedeem(w, r, "", "")
+	renderRedeem(w, r, "", "", "")
 }
 
 func pointsHandler(w http.ResponseWriter, r *http.Request) {
@@ -2760,7 +2829,7 @@ func passwordHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func checkinHandler(w http.ResponseWriter, r *http.Request) {
-	userID, _, _ := currentUser(r)
+	userID, username, _ := currentUser(r)
 	enabled, _ := models.GetConfig("enable_daily_checkin")
 
 	if r.Method == http.MethodPost {
@@ -2825,6 +2894,7 @@ func checkinHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logPoints(userID, int64(points), "每日签到获得")
+		systemLog(r, userID, username, "checkin", fmt.Sprintf("签到获得 %d 积分", points), int64(points))
 		renderPage(w, r, "layout.html", map[string]interface{}{
 			"Title":          "每日签到",
 			"CheckedIn":      true,
@@ -3229,9 +3299,12 @@ func adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	for k, v := range settings {
 		m[k] = v
 	}
+	var adminName string
+	models.DB.QueryRow("SELECT username FROM users WHERE role='admin' ORDER BY id LIMIT 1").Scan(&adminName)
 	renderPage(w, r, "layout.html", map[string]interface{}{
 		"Title":              "系统设置",
 		"Settings":           m,
+		"AdminUsername":      adminName,
 		"Endpoints":          loadEndpoints(),
 		"LdoCallback":        linuxdoCallbackURL(r),
 		"LdoDefaultCallback": linuxdoRequestCallback(r),
@@ -3265,7 +3338,7 @@ func adminUpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	// 统一处理，这里的通用循环跳过它们
 	for key, vals := range r.Form {
 		if key == "_csrf" || strings.HasPrefix(key, "ep_") || key == "generation_api_url" ||
-			key == "generation_api_key" || key == "generation_model" {
+			key == "generation_api_key" || key == "generation_model" || key == "admin_username" {
 			continue
 		}
 		value := ""
@@ -3298,6 +3371,29 @@ func adminUpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	// 多接口渠道列表：ep_name[]/ep_url[]/ep_key[]/ep_model[]/ep_nsfw[]/ep_res[]
 	// 解析为 JSON 存入 generation_endpoints，并回写旧字段保持兼容
 	saveEndpointsFromForm(r)
+	// 修改管理员用户名（校验 2-32 字符、不可与已有用户名冲突，改后同步会话）
+	if name := strings.TrimSpace(r.FormValue("admin_username")); name != "" {
+		var curName string
+		models.DB.QueryRow("SELECT username FROM users WHERE role='admin' ORDER BY id LIMIT 1").Scan(&curName)
+		if name != curName {
+			if len(name) < 2 || len(name) > 32 {
+				flashRedirect(w, r, "/admin/settings#basic", "管理员用户名长度需在 2-32 个字符之间")
+				return
+			}
+			if _, err := models.DB.Exec("UPDATE users SET username=? WHERE username=?", name, curName); err != nil {
+				flashRedirect(w, r, "/admin/settings#basic", "用户名已存在或修改失败")
+				return
+			}
+			if sess, err := store.Get(r, "session"); err == nil {
+				if sess.Values["username"] == curName {
+					sess.Values["username"] = name
+					sess.Save(r, w)
+				}
+			}
+			uid, _, _ := currentUser(r)
+			systemLog(r, uid, name, "admin_rename", "管理员用户名由 "+curName+" 修改为 "+name, 0)
+		}
+	}
 	// 按最新存储设置重建上传器（并发安全：worker 线程可能正在读取）
 	setUploader(loadStorageUploader())
 	// 保存后停留在当前设置分类标签（避免跳回"基本信息"）
@@ -3313,6 +3409,138 @@ func adminUpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		target += "#" + pane
 	}
 	flashRedirect(w, r, target, "设置已保存")
+}
+
+// adminSystemLogsHandler 系统日志页：记录用户行为（登录/注册/签到/创作/兑换/API
+// 调用等），支持按 时间区间 / 用户名 / 行为 / 积分变动 / IP 逐项筛选，分页展示。
+func adminSystemLogsHandler(w http.ResponseWriter, r *http.Request) {
+	const perPage = 20
+	page := atoiDefault(r.URL.Query().Get("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	q := r.URL.Query()
+	trim := func(name string) string { return strings.TrimSpace(q.Get(name)) }
+	from, to := trim("from"), trim("to")
+	user, act := trim("user"), trim("action")
+	delta, ip := trim("delta"), trim("ip")
+
+	where := []string{}
+	args := []interface{}{}
+	if from != "" {
+		where = append(where, "date(created_at) >= date(?)")
+		args = append(args, from)
+	}
+	if to != "" {
+		where = append(where, "date(created_at) <= date(?)")
+		args = append(args, to)
+	}
+	if user != "" {
+		where = append(where, "username LIKE ?")
+		args = append(args, "%"+user+"%")
+	}
+	if act != "" {
+		where = append(where, "action = ?")
+		args = append(args, act)
+	}
+	switch delta {
+	case "in":
+		where = append(where, "points_delta > 0")
+	case "out":
+		where = append(where, "points_delta < 0")
+	case "none":
+		where = append(where, "points_delta = 0")
+	}
+	if ip != "" {
+		where = append(where, "ip LIKE ?")
+		args = append(args, "%"+ip+"%")
+	}
+	clause := ""
+	if len(where) > 0 {
+		clause = " WHERE " + strings.Join(where, " AND ")
+	}
+	var total int
+	models.DB.QueryRow("SELECT COUNT(*) FROM system_logs"+clause, args...).Scan(&total)
+	totalPages := (total + perPage - 1) / perPage
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	list := []map[string]interface{}{}
+	rows, err := models.DB.Query("SELECT id, username, action, detail, points_delta, ip, created_at FROM system_logs"+clause+" ORDER BY id DESC LIMIT ? OFFSET ?", append(args, perPage, (page-1)*perPage)...)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			var uname, act2, detail, ipp, created string
+			var delta2 int64
+			if rows.Scan(&id, &uname, &act2, &detail, &delta2, &ipp, &created) == nil {
+				list = append(list, map[string]interface{}{
+					"ID":          id,
+					"Username":    uname,
+					"Action":      act2,
+					"ActionLabel": systemLogActionLabel(act2),
+					"Detail":      detail,
+					"Delta":       delta2,
+					"IP":          ipp,
+					"CreatedAt":   localTime(created),
+				})
+			}
+		}
+	}
+	// 行为筛选下拉：固定顺序展示常见行为，再补出现过的其它行为（去重）
+	actionOpts := []map[string]interface{}{}
+	seen := map[string]bool{}
+	for _, key := range []string{"login", "login_fail", "logout", "register", "checkin", "create", "redeem", "api"} {
+		if label, ok := systemLogActions[key]; ok {
+			actionOpts = append(actionOpts, map[string]interface{}{"Value": key, "Label": label})
+			seen[key] = true
+		}
+	}
+	aRows, err := models.DB.Query("SELECT DISTINCT action FROM system_logs ORDER BY action")
+	if err == nil {
+		defer aRows.Close()
+		for aRows.Next() {
+			var a string
+			if aRows.Scan(&a) == nil && a != "" && !seen[a] {
+				actionOpts = append(actionOpts, map[string]interface{}{"Value": a, "Label": systemLogActionLabel(a)})
+				seen[a] = true
+			}
+		}
+	}
+	// 分页链接携带当前筛选条件（& 结尾，方便直接拼 page=）
+	base := "/admin/logs?"
+	var parts []string
+	for k, v := range map[string]string{"from": from, "to": to, "user": user, "action": act, "delta": delta, "ip": ip} {
+		if v != "" {
+			parts = append(parts, k+"="+url.QueryEscape(v))
+		}
+	}
+	if len(parts) > 0 {
+		base += strings.Join(parts, "&") + "&"
+	}
+	renderPage(w, r, "layout.html", map[string]interface{}{
+		"Title":      "系统日志",
+		"Logs":       list,
+		"Total":      total,
+		"TotalPages": totalPages,
+		"Page":       page,
+		"HasPrev":    page > 1,
+		"HasNext":    page < totalPages,
+		"PrevPage":   page - 1,
+		"NextPage":   page + 1,
+		"PageBase":   base,
+		"Actions":    actionOpts,
+		"QFrom":      from,
+		"QTo":        to,
+		"QUser":      user,
+		"QAction":    act,
+		"QDelta":     delta,
+		"QIP":        ip,
+		"Content":    "content-admin-logs",
+	})
 }
 
 // ---------- 在线检测新版本 & 在线更新 ----------
@@ -4558,20 +4786,20 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 		password := r.FormValue("password")
 		regCode := strings.ToUpper(strings.TrimSpace(r.FormValue("reg_code")))
 		if len(username) < 2 || len(username) > 32 {
-			renderError(w, r, "400", "用户名长度需在 2-32 个字符之间")
+			renderOAuthSetup(w, r, "用户名长度需在 2-32 个字符之间", "", username)
 			return
 		}
 		if len(password) < 6 {
-			renderError(w, r, "400", "密码长度至少 6 位")
+			renderOAuthSetup(w, r, "密码长度至少 6 位", "", username)
 			return
 		}
 		if r.FormValue("confirm_password") != password {
-			renderError(w, r, "400", "两次输入的密码不一致")
+			renderOAuthSetup(w, r, "两次输入的密码不一致", "", username)
 			return
 		}
 		requireCode, _ := models.GetConfig("require_reg_code")
 		if requireCode == "true" && regCode == "" {
-			renderError(w, r, "400", "请输入注册码")
+			renderOAuthSetup(w, r, "", "请输入注册码", username)
 			return
 		}
 		hashed, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -4589,7 +4817,7 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 				username, string(hashed), initPoints, "user", 1, "linuxdo", strconv.FormatInt(pendingUID, 10))
 			if err != nil {
 				tx.Rollback()
-				renderError(w, r, "400", "用户名已存在或输入有误")
+				renderOAuthSetup(w, r, "用户名已存在或输入有误", "", username)
 				return
 			}
 			uid, _ = res.LastInsertId()
@@ -4601,7 +4829,7 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			if n, _ := res2.RowsAffected(); n == 0 {
 				tx.Rollback()
-				renderError(w, r, "400", "注册码无效或已被使用")
+				renderOAuthSetup(w, r, "", "注册码无效或已被使用", username)
 				return
 			}
 			if err := tx.Commit(); err != nil {
@@ -4612,7 +4840,7 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 			res, err := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id) VALUES(?,?,?,?,?,?,?)",
 				username, string(hashed), initPoints, "user", 1, "linuxdo", strconv.FormatInt(pendingUID, 10))
 			if err != nil {
-				renderError(w, r, "400", "用户名已存在或输入有误")
+				renderOAuthSetup(w, r, "用户名已存在或输入有误", "", username)
 				return
 			}
 			uid, _ = res.LastInsertId()
@@ -4624,6 +4852,7 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 		if initPoints > 0 {
 			logPoints(uid, int64(initPoints), "注册赠送")
 		}
+		systemLog(r, uid, username, "register", "Linux.do 第三方注册成功", int64(initPoints))
 		s := rotateSession(w, r)
 		s.Values["userID"] = uid
 		s.Values["username"] = username
@@ -4634,18 +4863,31 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// GET：渲染“完善账号信息”表单（用户名预填 Linux.do 用户名，可修改）
+	renderOAuthSetup(w, r, "", "", "")
+}
+
+// renderOAuthSetup 渲染 Linux.do 完善账号信息表单：errMsg（用户名/密码等）显示
+// 在表单顶部，regCodeErr（注册码问题）以红色文字显示在注册码输入框下方；出错时
+// 重渲染表单本身，不跳转到错误页面。username 为空时回填会话中的 Linux.do 用户名。
+func renderOAuthSetup(w http.ResponseWriter, r *http.Request, errMsg, regCodeErr, username string) {
+	session, _ := store.Get(r, "session")
+	if username == "" {
+		if pendingName, ok := session.Values["oauth_pending_username"].(string); ok {
+			username = pendingName
+		}
+	}
 	reqCode, _ := models.GetConfig("require_reg_code")
 	noStore(w)
 	err := tpl.ExecuteTemplate(w, "layout.html", map[string]interface{}{
 		"Title":          "完成注册",
-		"Error":          "",
+		"Error":          errMsg,
+		"RegCodeError":   regCodeErr,
 		"IsAdmin":        false,
 		"IsLoggedIn":     false,
 		"Points":         0,
 		"RequireRegCode": reqCode == "true",
-		"OAuthUsername":  pendingName,
+		"OAuthUsername":  username,
 		"SiteName":       siteName(),
-		"SiteNotice":     siteNotice(),
 		"Toast":          consumeFlash(w, r),
 		"CSRF":           csrfToken(w, r),
 		"Content":        "content-oauth-setup",
@@ -5191,6 +5433,9 @@ func apiGenerateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	rid, _ := res.LastInsertId()
 	logPoints(userID, -int64(cost), "AI 图片创作消耗")
+	var apiUser string
+	models.DB.QueryRow("SELECT username FROM users WHERE id=?", userID).Scan(&apiUser)
+	systemLog(r, userID, apiUser, "api", fmt.Sprintf("API 生成 %d 张（%s），任务 #%d", req.N, chanModel, rid), -int64(cost))
 	taskQueue <- genTask{recordID: rid}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

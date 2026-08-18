@@ -6,19 +6,16 @@
                 <h5 class="mb-0 fw-bold">积分兑换</h5>
             </div>
             <div class="card-body p-4">
-                {{if .Message}}
-                {{if eq .MessageType "error"}}
-                <div class="alert alert-danger dismissible-auto" role="alert">{{.Message}}</div>
-                {{else}}
+                {{if and .Message (eq .MessageType "success")}}
                 <div class="alert alert-success dismissible-auto" role="alert">{{.Message}}</div>
-                {{end}}
                 {{end}}
                 <p class="text-muted small mb-4">输入兑换码，即可将对应积分充入你的账户。</p>
                 <form method="POST" action="/redeem" data-submit="loading" novalidate>
                     <input type="hidden" name="_csrf" value="{{.CSRF}}">
                     <div class="mb-4">
                         <label class="form-label fw-semibold">兑换码</label>
-                        <input type="text" name="code" class="form-control form-control-lg text-center" placeholder="输 入 兑 换 码" required autocomplete="off" autofocus maxlength="32">
+                        <input type="text" name="code" class="form-control form-control-lg text-center{{if eq .MessageType "error"}} is-invalid{{end}}" placeholder="输 入 兑 换 码" required autocomplete="off" autofocus maxlength="32" value="{{.Code}}" aria-describedby="{{if eq .MessageType "error"}}codeError{{end}}">
+                        {{if eq .MessageType "error"}}<div class="text-danger small mt-1" id="codeError" role="alert">{{.Message}}</div>{{end}}
                     </div>
                     <button type="submit" class="btn btn-primary w-100 btn-lg btn-loading" data-loading-text="兑换中...">
                         <span>立即兑换</span>

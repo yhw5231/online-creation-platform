@@ -42,6 +42,11 @@
                             <label class="form-label fw-semibold">消耗积分 / 次</label>
                             <input name="generation_cost_points" type="number" min="1" class="form-control" value="{{.Settings.generation_cost_points}}" autocomplete="off">
                         </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">管理员用户名</label>
+                            <input name="admin_username" class="form-control" value="{{.AdminUsername}}" minlength="2" maxlength="32" autocomplete="off">
+                            <div class="form-text">后台管理员账号的用户名（2-32 个字符）。修改后需使用新用户名登录，与已有用户名冲突时保存失败。</div>
+                        </div>
                     </div>
                 </div>
             </div>

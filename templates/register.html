@@ -44,8 +44,8 @@
             </div>
             <div class="mb-4">
                 <label class="form-label fw-semibold">注册码{{if .RequireRegCode}} <span class="text-danger">*</span>{{end}}</label>
-                <input type="text" name="reg_code" class="form-control" placeholder="{{if .RequireRegCode}}请输入管理员发放的注册码{{else}}选填，留空跳过{{end}}" autocomplete="off" {{if .RequireRegCode}}required{{end}}>
-                {{if .RequireRegCode}}<div class="form-text">当前注册需凭邀请码，注册成功后该码作废。</div>{{end}}
+                <input type="text" name="reg_code" class="form-control{{if .RegCodeError}} is-invalid{{end}}" placeholder="{{if .RequireRegCode}}请输入管理员发放的注册码{{else}}选填，留空跳过{{end}}" autocomplete="off" {{if .RequireRegCode}}required{{end}}{{if .RegCodeError}} aria-describedby="regCodeError"{{end}}>
+                {{if .RegCodeError}}<div class="text-danger small mt-1" id="regCodeError" role="alert">{{.RegCodeError}}</div>{{else if .RequireRegCode}}<div class="form-text">当前注册需凭邀请码，注册成功后该码作废。</div>{{end}}
             </div>
             <button type="submit" class="btn btn-primary w-100 btn-loading" data-loading-text="注册中...">
                 <span>注 册</span>

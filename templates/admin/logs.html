@@ -1,0 +1,108 @@
+{{define "content-admin-logs"}}
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+    <div>
+        <h5 class="mb-0 fw-bold">系统日志</h5>
+        <span class="text-muted small">记录用户行为：登录、注册、签到、创作、兑换、API 调用等；支持按时间 / 用户 / 行为 / 积分变动 / IP 逐项筛选。</span>
+    </div>
+</div>
+
+<div class="card app-card mb-4 fade-in-up">
+    <div class="card-body p-4">
+        <form method="GET" action="/admin/logs" class="row g-3 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label fw-semibold small mb-1">开始日期</label>
+                <input type="date" name="from" class="form-control form-control-sm" value="{{.QFrom}}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-semibold small mb-1">结束日期</label>
+                <input type="date" name="to" class="form-control form-control-sm" value="{{.QTo}}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-semibold small mb-1">用户</label>
+                <input type="text" name="user" class="form-control form-control-sm" value="{{.QUser}}" placeholder="用户名，支持模糊">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-semibold small mb-1">行为</label>
+                <select name="action" class="form-select form-select-sm">
+                    <option value="">全部</option>
+                    {{range .Actions}}<option value="{{.Value}}" {{if eq $.QAction .Value}}selected{{end}}>{{.Label}}</option>{{end}}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-semibold small mb-1">积分变动</label>
+                <select name="delta" class="form-select form-select-sm">
+                    <option value="">全部</option>
+                    <option value="in" {{if eq .QDelta "in"}}selected{{end}}>加分（&gt;0）</option>
+                    <option value="out" {{if eq .QDelta "out"}}selected{{end}}>扣分（&lt;0）</option>
+                    <option value="none" {{if eq .QDelta "none"}}selected{{end}}>无变动（=0）</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-semibold small mb-1">IP 地址</label>
+                <input type="text" name="ip" class="form-control form-control-sm" value="{{.QIP}}" placeholder="IP，支持模糊">
+            </div>
+            <div class="col-12 d-flex gap-2">
+                <button type="submit" class="btn btn-primary btn-sm">筛 选</button>
+                <a href="/admin/logs" class="btn btn-outline-secondary btn-sm">重置</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card app-card fade-in-up">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0 app-table">
+            <thead>
+                <tr>
+                    <th class="text-nowrap">时间</th>
+                    <th>用户</th>
+                    <th>行为</th>
+                    <th>详情</th>
+                    <th class="text-nowrap">积分变动</th>
+                    <th>IP 地址</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{if .Logs}}
+                {{range .Logs}}
+                <tr>
+                    <td class="text-muted small text-nowrap">{{.CreatedAt}}</td>
+                    <td class="fw-semibold">{{if .Username}}{{.Username}}{{else}}<span class="text-muted">—</span>{{end}}</td>
+                    <td><span class="badge text-bg-light">{{.ActionLabel}}</span></td>
+                    <td class="small">{{.Detail}}</td>
+                    <td class="text-nowrap">{{if gt .Delta 0}}<span class="text-success fw-semibold">+{{.Delta}}</span>{{else if lt .Delta 0}}<span class="text-danger fw-semibold">{{.Delta}}</span>{{else}}<span class="text-muted">0</span>{{end}}</td>
+                    <td class="font-monospace small text-muted">{{.IP}}</td>
+                </tr>
+                {{end}}
+                {{else}}
+                <tr>
+                    <td colspan="6" class="text-center text-muted py-5">暂无符合条件的日志记录</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{if gt .TotalPages 1}}
+    <div class="d-flex justify-content-center py-3 border-top">
+        <ul class="pagination app-pagination mb-0">
+            <li class="page-item {{if not .HasPrev}}disabled{{end}}">
+                <a class="page-link" href="{{.PageBase}}page={{.PrevPage}}">上一页</a>
+            </li>
+            {{range $p := pages $.Page $.TotalPages}}
+            {{if eq $p 0}}
+            <li class="page-item disabled"><span class="page-link">…</span></li>
+            {{else}}
+            <li class="page-item {{if eq $p $.Page}}active{{end}}">
+                <a class="page-link" href="{{$.PageBase}}page={{$p}}">{{$p}}</a>
+            </li>
+            {{end}}
+            {{end}}
+            <li class="page-item {{if not .HasNext}}disabled{{end}}">
+                <a class="page-link" href="{{.PageBase}}page={{.NextPage}}">下一页</a>
+            </li>
+        </ul>
+    </div>
+    <div class="text-center text-muted small pb-3">共 {{.Total}} 条记录，第 {{.Page}} / {{.TotalPages}} 页</div>
+    {{end}}
+</div>
+{{end}}

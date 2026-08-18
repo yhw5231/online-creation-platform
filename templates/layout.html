@@ -4,14 +4,6 @@
 {{template "head" .}}
 <body data-toast="{{.Toast}}">
     {{template "nav" .}}
-    {{if .SiteNotice}}
-    <div class="site-notice" id="siteNotice" role="note">
-        <div class="container d-flex align-items-center justify-content-between gap-2 py-1">
-            <span class="small py-1">{{.SiteNotice}}</span>
-            <button type="button" class="btn-close btn-close-white flex-shrink-0" data-dismiss-notice aria-label="关闭公告" style="--bs-btn-close-color:#4b5563;"></button>
-        </div>
-    </div>
-    {{end}}
     <main class="container app-main py-4">
         {{if eq .Content "content-home"}}{{template "content-home" .}}
         {{else if eq .Content "content-login"}}{{template "content-login" .}}
@@ -24,6 +16,7 @@
         {{else if eq .Content "content-users"}}{{template "content-users" .}}
         {{else if eq .Content "content-dashboard"}}{{template "content-dashboard" .}}
         {{else if eq .Content "content-settings"}}{{template "content-settings" .}}
+        {{else if eq .Content "content-admin-logs"}}{{template "content-admin-logs" .}}
         {{else if eq .Content "content-redeem-admin"}}{{template "content-redeem-admin" .}}
         {{else if eq .Content "content-points"}}{{template "content-points" .}}
         {{else if eq .Content "content-password"}}{{template "content-password" .}}
@@ -115,6 +108,7 @@
                 <li class="nav-item"><a class="nav-link" data-nav="/redeem" href="/redeem">积分兑换</a></li>
                 <li class="nav-item"><a class="nav-link" data-nav="/checkin" href="/checkin">每日签到{{if .CheckinAvailable}}<span class="nav-dot" title="今日可签到"></span>{{end}}</a></li>
                 <li class="nav-item"><a class="nav-link" data-nav="/leaderboard" href="/leaderboard">排行榜</a></li>
+                <li class="nav-item"><a class="nav-link" data-nav="/notices" href="/notices">公告{{if .UnreadNotices}}<span class="nav-dot" title="有新的公告"></span>{{end}}</a></li>
                 {{if .IsAdmin}}
                 <li class="nav-item dropdown">
                     <a class="nav-link dropdown-toggle" data-nav="/admin" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">管理后台</a>
@@ -124,6 +118,7 @@
                         <li><a class="dropdown-item" href="/admin/redeem-codes">兑换码管理</a></li>
                         <li><a class="dropdown-item" href="/admin/notices">公告管理</a></li>
                         <li><a class="dropdown-item" href="/admin/settings">系统设置</a></li>
+                        <li><a class="dropdown-item" href="/admin/logs">系统日志</a></li>
                     </ul>
                 </li>
                 {{end}}

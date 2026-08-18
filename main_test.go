@@ -927,6 +927,508 @@ func TestRedeemCodeTypes(t *testing.T) {
 	}
 }
 
+// TestCodeErrorShownInline 验证兑换码/注册码不可用时，错误以红色文字显示在对应
+// 输入框下方（is-invalid 高亮），页面停留在表单本身，绝不跳转到整页错误页：
+// /redeem 兑换页、/register 注册页、Linux.do 完善账号页（此前会跳转错误页）。
+func TestCodeErrorShownInline(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "inline.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	// 积分兑换码：可兑换积分，但不能用作注册码
+	models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status) VALUES(?,?,?,?,?)", "PTSONLY1", 10, "points", 0, "active")
+	// 兑换用户 + 伪造会话
+	res, _ := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)", "redeemer2", "x", 0, "user", 1)
+	uid, _ := res.LastInsertId()
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	s, _ := store.New(r2, "session")
+	s.Values["userID"] = uid
+	s.Values["username"] = "redeemer2"
+	s.Values["role"] = "user"
+	s.Save(r2, w2)
+	all := w2.Header().Values("Set-Cookie")
+	cookie := all[len(all)-1]
+	r3 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r3.Header.Set("Cookie", cookie)
+	redeemCSRF := csrfToken(w2, r3)
+	// csrfToken 会把令牌写回会话并重发 Cookie，取最后一次 Set-Cookie
+	all = w2.Header().Values("Set-Cookie")
+	cookie = all[len(all)-1]
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodPost, "/redeem", strings.NewReader(url.Values{
+		"code":  {"NOPE123"},
+		"_csrf": {redeemCSRF},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", cookie)
+	redeemHandler(ww, rr)
+	body := ww.Body.String()
+	if ww.Code != http.StatusOK {
+		t.Fatalf("redeem invalid code status = %d", ww.Code)
+	}
+	if !strings.Contains(body, "id=\"codeError\"") || !strings.Contains(body, "兑换码无效或已被使用") {
+		t.Errorf("redeem inline error missing:\n%s", truncateRunes(body, 600))
+	}
+	if !strings.Contains(body, "is-invalid") {
+		t.Error("redeem input should get is-invalid class")
+	}
+	if !strings.Contains(body, "value=\"NOPE123\"") {
+		t.Error("redeem input should keep the entered code")
+	}
+	if strings.Contains(body, "alert alert-danger") || strings.Contains(body, "error-wrap") {
+		t.Error("redeem page should not show top alert or error page")
+	}
+
+	// 2) /register POST 用积分码当注册码（require_reg_code 开启）→ 内联错误
+	models.SetConfig("require_reg_code", "true")
+	models.SetConfig("open_registration", "true")
+	models.SetConfig("enable_password_registration", "true")
+	w3 := httptest.NewRecorder()
+	r3b := httptest.NewRequest(http.MethodGet, "/register", nil)
+	regCSRF := csrfToken(w3, r3b)
+	regCookie := w3.Header().Get("Set-Cookie")
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(url.Values{
+		"_csrf":            {regCSRF},
+		"username":         {"baduser2"},
+		"password":         {"123456"},
+		"confirm_password": {"123456"},
+		"reg_code":         {"PTSONLY1"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", regCookie)
+	registerHandler(ww, rr)
+	body = ww.Body.String()
+	if ww.Code != http.StatusOK {
+		t.Fatalf("register invalid code status = %d", ww.Code)
+	}
+	if !strings.Contains(body, "id=\"regCodeError\"") || !strings.Contains(body, "注册码无效或已被使用") {
+		t.Errorf("register inline reg-code error missing:\n%s", truncateRunes(body, 600))
+	}
+	if !strings.Contains(body, "is-invalid") {
+		t.Error("register reg_code input should get is-invalid class")
+	}
+	if strings.Contains(body, "error-wrap") {
+		t.Error("register should not render the error page")
+	}
+
+	// 3) Linux.do 完善账号页 POST 无效注册码：不再跳整页错误，回表单并内联提示
+	models.SetConfig("enable_thirdparty_registration", "true")
+	w4 := httptest.NewRecorder()
+	r4 := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/setup", nil)
+	s4, _ := store.New(r4, "session")
+	s4.Values["oauth_pending_user_id"] = int64(99991)
+	s4.Values["oauth_pending_username"] = "linuxuser"
+	s4.Values["oauth_pending_next"] = "/create"
+	s4.Save(r4, w4)
+	c4 := w4.Header().Get("Set-Cookie")
+	r4b := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/setup", nil)
+	r4b.Header.Set("Cookie", c4)
+	setupCSRF := csrfToken(w4, r4b)
+	all = w4.Header().Values("Set-Cookie")
+	oatCookie := all[len(all)-1]
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/auth/linuxdo/setup", strings.NewReader(url.Values{
+		"_csrf":            {setupCSRF},
+		"username":         {"linuxuser"},
+		"password":         {"123456"},
+		"confirm_password": {"123456"},
+		"reg_code":         {"PTSONLY1"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", oatCookie)
+	linuxdoSetupHandler(ww, rr)
+	body = ww.Body.String()
+	if ww.Code != http.StatusOK {
+		t.Fatalf("oauth setup invalid code status = %d", ww.Code)
+	}
+	if !strings.Contains(body, "id=\"regCodeError\"") || !strings.Contains(body, "注册码无效或已被使用") {
+		t.Errorf("oauth setup inline reg-code error missing:\n%s", truncateRunes(body, 600))
+	}
+	if strings.Contains(body, "error-wrap") {
+		t.Error("oauth setup must not jump to the full error page")
+	}
+	if !strings.Contains(body, "value=\"linuxuser\"") {
+		t.Error("oauth setup should keep the entered username")
+	}
+}
+
+// lastCookie 返回 recorder 中最后一次 Set-Cookie（会话状态最新的一份）。
+func lastCookie(w *httptest.ResponseRecorder) string {
+	all := w.Header().Values("Set-Cookie")
+	if len(all) == 0 {
+		return ""
+	}
+	return all[len(all)-1]
+}
+
+// TestUnreadNoticeNavDot 验证公告不再全局悬浮：只有导航“公告”入口，存在未读
+// （更新的）公告时显示红点；访问公告页后红点消失，新公告发布后再次出现。
+func TestUnreadNoticeNavDot(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "notice.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	res, _ := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)", "noticeUser", "x", 0, "user", 1)
+	uid, _ := res.LastInsertId()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	s, _ := store.New(r, "session")
+	s.Values["userID"] = uid
+	s.Values["username"] = "noticeUser"
+	s.Values["role"] = "user"
+	s.Save(r, w)
+	cookie := w.Header().Get("Set-Cookie")
+
+	redeemPage := func() string {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodGet, "/redeem", nil)
+		rr.Header.Set("Cookie", cookie)
+		redeemHandler(ww, rr)
+		return ww.Body.String()
+	}
+	// 1) 无公告：导航显示“公告”但无红点，且页面不再有悬浮公告条
+	body := redeemPage()
+	if !strings.Contains(body, "data-nav=\"/notices\"") {
+		t.Error("nav should include the notices entry in the nav row")
+	}
+	if strings.Contains(body, "有新的公告") {
+		t.Error("no red dot expected when there are no notices")
+	}
+	if strings.Contains(body, "site-notice") {
+		t.Error("floating announcement bar should be gone")
+	}
+	// 2) 发布新公告：导航出现红点
+	models.DB.Exec("INSERT INTO notices(title, content, is_active) VALUES(?,?,1)", "新公告", "内容")
+	body = redeemPage()
+	if !strings.Contains(body, "title=\"有新的公告\"") {
+		t.Error("red dot should appear when an unread notice exists")
+	}
+	// 3) 访问公告页后红点消失
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodGet, "/notices", nil)
+	rr.Header.Set("Cookie", cookie)
+	noticesHandler(ww, rr)
+	body = redeemPage()
+	if strings.Contains(body, "有新的公告") {
+		t.Error("red dot should disappear after reading notices")
+	}
+	// 4) 再发一条新公告：红点复现
+	models.DB.Exec("INSERT INTO notices(title, content, is_active) VALUES(?,?,1)", "再一条", "内容")
+	body = redeemPage()
+	if !strings.Contains(body, "title=\"有新的公告\"") {
+		t.Error("red dot should reappear after a newer notice is published")
+	}
+}
+
+// TestSystemLogsAndFilters 验证系统日志：登录（成功/失败）、签到、兑换、创作、
+// API 调用均记录 时间/用户/行为/积分变动/IP；管理后台日志页可按各字段筛选。
+func TestSystemLogsAndFilters(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "logs.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	models.SetConfig("enable_daily_checkin", "true")
+	models.SetConfig("checkin_mode", "fixed")
+	models.SetConfig("checkin_fixed_points", "10")
+	models.SetConfig("generation_cost_points", "10")
+	models.SetConfig("generation_endpoints", `[{"id":1,"name":"主渠道","api_url":"https://a.example/v1","api_key":"k1","resolutions":["1k","2k"],"models":["grok-imagine-image-lite"]}]`)
+	models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status) VALUES(?,?,?,?,?)", "LOGCODE1", 30, "points", 0, "active")
+
+	// 用 seedAdmin 创建的 admin 账号走完整登录流程（密码 admin123）
+	// 1) 登录失败
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	s, _ := store.New(r, "session")
+	s.Save(r, w)
+	c1 := w.Header().Get("Set-Cookie")
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.Header.Set("Cookie", c1)
+	csrf1 := csrfToken(w, r2)
+	c1 = lastCookie(w)
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(url.Values{
+		"_csrf":    {csrf1},
+		"username": {"admin"},
+		"password": {"wrong-pass"},
+	}.Encode()))
+	rr.RemoteAddr = "203.0.113.9:4321"
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", c1)
+	loginHandler(ww, rr)
+	if ww.Code != http.StatusOK {
+		t.Fatalf("failed login status = %d", ww.Code)
+	}
+	// 2) 登录成功（会话轮换后取新 Cookie）
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(url.Values{
+		"_csrf":    {csrf1},
+		"username": {"admin"},
+		"password": {"admin123"},
+	}.Encode()))
+	rr.RemoteAddr = "203.0.113.9:4321"
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", c1)
+	loginHandler(ww, rr)
+	if ww.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d", ww.Code)
+	}
+	c2 := lastCookie(ww)
+	r3 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r3.Header.Set("Cookie", c2)
+	csrf2 := csrfToken(ww, r3)
+	c2 = lastCookie(ww)
+
+	post := func(path string, form url.Values) *httptest.ResponseRecorder {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+		rr.RemoteAddr = "203.0.113.9:4321"
+		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr.Header.Set("Cookie", c2)
+		rr.Header.Set("Referer", "http://x/"+path)
+		switch path {
+		case "/checkin":
+			checkinHandler(ww, rr)
+		case "/redeem":
+			redeemHandler(ww, rr)
+		case "/generate":
+			generateHandler(ww, rr)
+		}
+		return ww
+	}
+	// 3) 签到
+	post("/checkin", url.Values{"_csrf": {csrf2}})
+	// 4) 兑换
+	post("/redeem", url.Values{"_csrf": {csrf2}, "code": {"LOGCODE1"}})
+	// 5) 创作（网页）
+	genTokR := httptest.NewRecorder()
+	genTokReq := httptest.NewRequest(http.MethodGet, "/create", nil)
+	genTokReq.Header.Set("Cookie", c2)
+	genToken := mintToken(genTokR, genTokReq, "gen_token")
+	c2 = lastCookie(genTokR)
+	post("/generate", url.Values{
+		"_csrf":        {csrf2},
+		"_gen_token":   {genToken},
+		"prompt":       {"系统日志测试"},
+		"channel":      {"1"},
+		"resolution":   {"1k"},
+		"model":        {"grok-imagine-image-lite"},
+		"aspect_ratio": {"1:1"},
+		"n":            {"1"},
+	})
+	// 6) API 调用
+	var uid int64
+	models.DB.QueryRow("SELECT id FROM users WHERE username='admin'").Scan(&uid)
+	apiKey, _ := models.SetAPIKey(uid)
+	aww := httptest.NewRecorder()
+	arr := httptest.NewRequest(http.MethodPost, "/api/v1/generate", strings.NewReader(`{"prompt":"API测试","channel":"1","n":2,"resolution":"1k","aspect_ratio":"1:1"}`))
+	arr.RemoteAddr = "198.51.100.7:9000"
+	arr.Header.Set("Content-Type", "application/json")
+	arr.Header.Set("Authorization", "Bearer "+apiKey)
+	apiAuthMiddleware(apiGenerateHandler)(aww, arr)
+	if aww.Code != http.StatusOK {
+		t.Fatalf("api generate status = %d body=%s", aww.Code, aww.Body.String())
+	}
+
+	// 7) 落库断言：6 类行为各一条，积分变动正确
+	rows, err := models.DB.Query("SELECT action, points_delta, ip, username FROM system_logs ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type lr struct {
+		action string
+		delta  int64
+		ip     string
+		uname  string
+	}
+	var got []lr
+	for rows.Next() {
+		var e lr
+		if rows.Scan(&e.action, &e.delta, &e.ip, &e.uname) == nil {
+			got = append(got, e)
+		}
+	}
+	want := []lr{{"login_fail", 0, "203.0.113.9", "admin"}, {"login", 0, "203.0.113.9", "admin"},
+		{"checkin", 10, "203.0.113.9", "admin"}, {"redeem", 30, "203.0.113.9", "admin"},
+		{"create", -10, "203.0.113.9", "admin"}, {"api", -20, "198.51.100.7", "admin"}}
+	if len(got) != len(want) {
+		t.Fatalf("system logs = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("log[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// 8) 管理后台日志页：列表与筛选
+	getLogs := func(query string) string {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodGet, "/admin/logs"+query, nil)
+		rr.Header.Set("Cookie", c2)
+		adminSystemLogsHandler(ww, rr)
+		return ww.Body.String()
+	}
+	body := getLogs("")
+	if !strings.Contains(body, "签到获得 10 积分") || !strings.Contains(body, "兑换 30 积分") ||
+		!strings.Contains(body, "API 生成") || !strings.Contains(body, "登录成功") {
+		t.Errorf("admin logs page missing entries:\n%s", truncateRunes(body, 800))
+	}
+	if !strings.Contains(body, "203.0.113.9") || !strings.Contains(body, "198.51.100.7") {
+		t.Error("admin logs page should show IP addresses")
+	}
+	// 行为筛选
+	body = getLogs("?action=checkin")
+	if !strings.Contains(body, "签到获得 10 积分") || strings.Contains(body, "登录成功") {
+		t.Error("action=checkin filter should keep only checkin rows")
+	}
+	// 用户名筛选
+	body = getLogs("?user=admin")
+	if !strings.Contains(body, "签到获得 10 积分") || strings.Contains(body, "暂无符合条件的日志记录") {
+		t.Error("user=admin filter should match rows")
+	}
+	body = getLogs("?user=nobody")
+	if !strings.Contains(body, "暂无符合条件的日志记录") {
+		t.Error("user=nobody filter should return empty")
+	}
+	// 积分变动筛选（按单元格标记断言，避免被导航 SVG 路径里的 -10 干扰）
+	body = getLogs("?delta=in")
+	if !strings.Contains(body, "text-success fw-semibold\">+30") || !strings.Contains(body, "text-success fw-semibold\">+10") ||
+		strings.Contains(body, "text-danger fw-semibold") {
+		t.Errorf("delta=in filter should show only positive changes:\n%s", truncateRunes(body, 3000))
+	}
+	body = getLogs("?delta=out")
+	if !strings.Contains(body, "text-danger fw-semibold\">-10") || !strings.Contains(body, "text-danger fw-semibold\">-20") ||
+		strings.Contains(body, "text-success fw-semibold") {
+		t.Errorf("delta=out filter should show only negative changes:\n%s", truncateRunes(body, 3000))
+	}
+	// IP 筛选
+	body = getLogs("?ip=198.51.100")
+	if !strings.Contains(body, "API 生成") || strings.Contains(body, "签到获得") {
+		t.Error("ip filter should match only API row")
+	}
+	// 时间筛选：未来日期 → 空
+	body = getLogs("?from=2999-01-01&to=2999-12-31")
+	if !strings.Contains(body, "暂无符合条件的日志记录") {
+		t.Error("future date range should return empty")
+	}
+}
+
+// TestAdminRenameUsername 验证管理员用户名可修改：设置页回显当前用户名，
+// 保存后在 users 表生效并与会话同步；重名/过短被拒绝。
+func TestAdminRenameUsername(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "rename.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	var uid int64
+	models.DB.QueryRow("SELECT id FROM users WHERE username='admin'").Scan(&uid)
+	// 管理员会话 + CSRF
+	buildSess := func() (string, string) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
+		s, _ := store.New(r, "session")
+		s.Values["userID"] = uid
+		s.Values["username"] = "admin"
+		s.Values["role"] = "admin"
+		s.Save(r, w)
+		c := w.Header().Get("Set-Cookie")
+		r2 := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
+		r2.Header.Set("Cookie", c)
+		csrf := csrfToken(w, r2)
+		return csrf, lastCookie(w)
+	}
+	csrf, cookie := buildSess()
+	save := func(name string) (*httptest.ResponseRecorder, string) {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, "/admin/update-settings", strings.NewReader(url.Values{
+			"_csrf":          {csrf},
+			"admin_username": {name},
+			"settings_pane":  {"basic"},
+		}.Encode()))
+		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr.Header.Set("Cookie", cookie)
+		adminUpdateSettingsHandler(ww, rr)
+		return ww, ww.Body.String()
+	}
+	// 1) 设置页回显当前用户名
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
+	rr.Header.Set("Cookie", cookie)
+	adminSettingsHandler(ww, rr)
+	if !strings.Contains(ww.Body.String(), "value=\"admin\"") {
+		t.Error("settings page should show current admin username")
+	}
+	// 2) 正常改名成功
+	if ww, _ := save("newadmin"); ww.Code != http.StatusSeeOther {
+		t.Fatalf("rename status = %d", ww.Code)
+	}
+	var name string
+	models.DB.QueryRow("SELECT username FROM users WHERE id=?", uid).Scan(&name)
+	if name != "newadmin" {
+		t.Errorf("admin username = %q, want newadmin", name)
+	}
+	// 3) 重名被拒绝
+	models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)", "taken", "x", 0, "user", 1)
+	w2, _ := save("taken")
+	if w2.Code != http.StatusSeeOther {
+		t.Fatalf("conflict save status = %d", w2.Code)
+	}
+	models.DB.QueryRow("SELECT username FROM users WHERE id=?", uid).Scan(&name)
+	if name != "newadmin" {
+		t.Errorf("conflicting rename should be rejected, got %q", name)
+	}
+	// 4) 过短用户名被拒绝
+	if ww, _ := save("a"); ww.Code != http.StatusSeeOther {
+		t.Fatalf("short name status = %d", ww.Code)
+	}
+	models.DB.QueryRow("SELECT username FROM users WHERE id=?", uid).Scan(&name)
+	if name != "newadmin" {
+		t.Errorf("too-short rename should be rejected, got %q", name)
+	}
+}
+
 // TestRedeemCodeBatchAndRemark 验证兑换码管理页的批量能力：
 // 生成时备注写入、列表展示生成时间与备注、批量备注/批量作废（逗号分隔 ids）、
 // 页面包含批量选择与复制控件。

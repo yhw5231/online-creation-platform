@@ -43,6 +43,7 @@ func migrate() error {
 			role TEXT DEFAULT 'user',
 			status INTEGER DEFAULT 1,
 			api_key TEXT DEFAULT '',
+			last_read_notice_id INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS generation_records (
@@ -111,6 +112,20 @@ func migrate() error {
 			is_active INTEGER NOT NULL DEFAULT 1,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS system_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL DEFAULT 0,
+			username TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			detail TEXT NOT NULL DEFAULT '',
+			points_delta INTEGER NOT NULL DEFAULT 0,
+			ip TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_system_logs_created ON system_logs(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_system_logs_user ON system_logs(username)`,
+		`CREATE INDEX IF NOT EXISTS idx_system_logs_action ON system_logs(action)`,
+		`CREATE INDEX IF NOT EXISTS idx_system_logs_ip ON system_logs(ip)`,
 	}
 	for _, s := range stmts {
 		if _, err := DB.Exec(s); err != nil {
@@ -150,6 +165,8 @@ func ensureColumns() error {
 		"ALTER TABLE redeem_codes ADD COLUMN kind TEXT DEFAULT ''",
 		// redeem_codes.remark：管理员为该码填写的备注（区分用途/来源）
 		"ALTER TABLE redeem_codes ADD COLUMN remark TEXT DEFAULT ''",
+		// users.last_read_notice_id：用户已读公告推进到的最新公告 id，用于导航红点
+		"ALTER TABLE users ADD COLUMN last_read_notice_id INTEGER NOT NULL DEFAULT 0",
 	}
 	for _, ddl := range adds {
 		if _, err := DB.Exec(ddl); err != nil {
