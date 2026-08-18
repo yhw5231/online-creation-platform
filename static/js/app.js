@@ -57,6 +57,9 @@
 
   /* ---------- 表单提交加载态 ---------- */
   document.querySelectorAll('form[data-submit]').forEach(function (form) {
+    // data-async 表单由下方异步处理器统一管理按钮加载态与出错恢复，
+    // 此处跳过，避免先把按钮替换成加载态、导致异步出错后无法复原
+    if (form.hasAttribute('data-async')) return;
     form.addEventListener('submit', function () {
       form.querySelectorAll('.btn-loading').forEach(function (btn) {
         var text = btn.getAttribute('data-loading-text') || '处理中...';
@@ -175,11 +178,14 @@
 
     document.querySelectorAll('form[data-async]').forEach(function (form) {
       var btn = form.querySelector('.btn-loading');
+      // 在绑定阶段就记录按钮原始内容：提交出错时用它复原按钮。
+      // 不能在 submit 时才读取 innerHTML，否则可能拿到的是加载态内容，
+      // 导致“注册中/兑换中”等提示无法恢复。
+      var origHTML = btn ? btn.innerHTML : '';
       form.addEventListener('submit', function (e) {
         e.preventDefault();
         if (form.getAttribute('data-ajax-busy') === '1') return;
         form.setAttribute('data-ajax-busy', '1');
-        var origHTML = btn ? btn.innerHTML : '';
         if (btn) {
           var text = btn.getAttribute('data-loading-text') || '处理中...';
           btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>' + esc(text);
