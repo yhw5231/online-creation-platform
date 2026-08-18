@@ -236,10 +236,13 @@ sudo journalctl -u online-creation -f   # 查看日志
 ```bash
 # 在项目根目录（已 clone），仅需 Go 1.21+，无需 Docker
 go mod download
-go build -o app .        # Windows 产出 app.exe，Linux/macOS 产出 app
+./build.sh                 # 自动从 git 最新标签推导版本号注入二进制，产出 app
+                           # （Windows 用 build.bat，产出 app.exe；无标签时版本为 v0.0.0-dev）
 mkdir -p data static
 SESSION_SECRET=xxx ./app # 或 Windows: $env:SESSION_SECRET="xxx"; .\app.exe
 ```
+
+> 版本号说明：`main.AppVersion` 默认值为 `v1.0.0`，只有通过 `-ldflags "-X main.AppVersion=vX.Y.Z"` 注入才是真实版本。CI 发布（打 v 标签）时自动注入；本地构建请使用 `build.sh` / `build.bat`，脚本会从最近一次 git 标签自动推导版本号，避免系统内版本号与发布版本不一致。
 
 与 4.1~4.5 的原生二进制运行方式相同，区别仅是自行编译产物，适合本地调试与二次开发。
 
