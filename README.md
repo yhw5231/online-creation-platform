@@ -41,6 +41,20 @@ docker compose up -d
 
 > 容器以非 root 用户（UID 1000）运行；./data 为 bind-mount，宿主目录需允许 UID 1000 写入，否则日志会出现 WARN: cannot persist session key ... using in-memory key（会话密钥改用内存密钥，建议显式设置 SESSION_SECRET）。
 
+### 2b. 原生二进制运行（无需 Docker，支持 Windows / macOS / Linux）
+
+在不安装 Docker 的电脑上直接运行：到 **[GitHub Releases](https://github.com/yhw5231/online-creation-platform/releases)** 下载对应平台的压缩包（打 `v*` 标签时由 GitHub Actions 自动构建发布）：
+
+| 文件 | 平台 |
+|------|------|
+| `online-creation-windows-amd64.zip` | Windows 10/11（Intel/AMD） |
+| `online-creation-windows-arm64.zip` | Windows ARM64 |
+| `online-creation-darwin-amd64.tar.gz` | macOS（Intel） |
+| `online-creation-darwin-arm64.tar.gz` | macOS（Apple 芯片） |
+| `online-creation-linux-amd64.tar.gz` / `-arm64.tar.gz` | Linux x86_64 / ARM64 |
+
+解压后运行 `app`（Windows 为 `app.exe`），默认监听 `:8900`，数据保存在 `data/`。详见 [docs/deployment.md](docs/deployment.md) 第 4 节。
+
 ### 3. 源码运行（本地开发）
 
 ```bash

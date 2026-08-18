@@ -9,7 +9,7 @@
 1. [前置要求](#1-前置要求)
 2. [拉取代码](#2-拉取代码)
 3. [部署方式一：Docker 部署（推荐）](#3-部署方式一docker-部署推荐)
-4. [部署方式二：源码编译部署](#4-部署方式二源码编译部署)
+4. [部署方式二：原生二进制部署（无需 Docker，支持 Windows / macOS / Linux）](#4-部署方式二原生二进制部署无需-docker支持-windows--macos--linux)
 5. [环境变量配置](#5-环境变量配置)
 6. [首次启动与初始化](#6-首次启动与初始化)
 7. [管理后台部署设置](#7-管理后台部署设置)
@@ -145,36 +145,53 @@ curl http://127.0.0.1:8900/health
 
 ---
 
-## 4. 部署方式二：源码编译部署
+## 4. 部署方式二：原生二进制部署（无需 Docker，支持 Windows / macOS / Linux）
 
-### 4.1 准备目录与构建
+> **适用场景**：未安装 Docker 的 Windows / macOS / Linux 电脑直接运行。
+> **获取方式**：GitHub Releases 页面（`https://github.com/yhw5231/online-creation-platform/releases`）下载对应平台的压缩包：
+>
+> | 文件 | 适用平台 |
+> |------|---------|
+> | `online-creation-windows-amd64.zip` | Windows 10/11（Intel/AMD 64 位），解压后运行 `app.exe` |
+> | `online-creation-windows-arm64.zip` | Windows ARM64（如骁龙笔记本） |
+> | `online-creation-darwin-amd64.tar.gz` | macOS（Intel 芯片） |
+> | `online-creation-darwin-arm64.tar.gz` | macOS（Apple 芯片 M1/M2/M3…） |
+> | `online-creation-linux-amd64.tar.gz` | Linux x86_64（同容器镜像架构，无需 Docker） |
+> | `online-creation-linux-arm64.tar.gz` | Linux ARM64（如树莓派） |
+>
+> 压缩包内含可执行文件 `app`（Windows 为 `app.exe`）+ `templates/` + `static/`，解压后按以下步骤运行（自动完成构建、下载依赖，无需安装 Go）。
+
+### 4.1 解压并配置
 
 ```bash
-# 在项目根目录（已 clone）
-# 下载依赖并编译（Windows 上产出 app.exe，Linux/macOS 产出 app）
-go mod download
-go build -o app .
-
-# 创建运行时目录（数据库与图片）
+# 以 macOS / Linux 为例（Windows 解压 zip 后同理，在项目目录内执行）
+tar -xzf online-creation-darwin-arm64.tar.gz
+cd online-creation-darwin-arm64   # 解压出的目录，内含 app / templates / static
 mkdir -p data static
 ```
 
-### 4.2 配置环境变量
+按第 5 节配置环境变量（Windows 用 `set` 或系统环境变量代替 `export`）。
+
+### 4.2 启动
 
 ```bash
-# 以 systemd 为例：/etc/systemd/system/online-creation.service
-# 先编辑环境变量文件 /etc/online-creation.env：
-cat > /etc/online-creation.env <<'EOF'
-PORT=8900
-SESSION_SECRET=请替换为至少16位的随机字符串
-COOKIE_SECURE=false
-TRUST_PROXY_HEADERS=false
-TZ=Asia/Shanghai
-EOF
-chmod 600 /etc/online-creation.env   # 含密钥，仅 root 可读
+# macOS / Linux —— 首次运行 mac 二进制需授予执行权限
+chmod +x app
+SESSION_SECRET=至少16位随机串 ./app
+
+# Windows —— 在解压目录内，PowerShell：
+# $env:SESSION_SECRET="至少16位随机串"; .\app.exe
 ```
 
-### 4.3 注册 systemd 服务（Linux）
+默认监听 `:8900`，浏览器访问 `http://127.0.0.1:8900`；健康检查同 3.3 节。
+
+### 4.3 注意事项
+
+- 原生二进制为**独立可执行文件**，不依赖 Docker / Go 环境；数据库与图片同样保存在 `data/`。
+- 后台常驻建议用系统服务：Linux 见下方 4.4 systemd 示例；Windows 可用「任务计划程序」或 NSSM 注册服务；macOS 可用 launchd。
+- `static/` 随包提供，如需自定义样式直接修改解压目录中的文件。
+
+### 4.4 systemd 服务（Linux 原生二进制）
 
 ```bash
 cat > /etc/systemd/system/online-creation.service <<'EOF'
@@ -204,7 +221,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now online-creation
 ```
 
-### 4.4 验证
+### 4.5 验证
 
 ```bash
 sudo systemctl status online-creation   # active (running)
@@ -213,6 +230,18 @@ sudo journalctl -u online-creation -f   # 查看日志
 ```
 
 > 直接前台运行验证（临时）：`SESSION_SECRET=xxx ./app`，Ctrl+C 停止。
+
+### 4.6 源码编译部署（本地开发 / 有 Go 环境时）
+
+```bash
+# 在项目根目录（已 clone），仅需 Go 1.21+，无需 Docker
+go mod download
+go build -o app .        # Windows 产出 app.exe，Linux/macOS 产出 app
+mkdir -p data static
+SESSION_SECRET=xxx ./app # 或 Windows: $env:SESSION_SECRET="xxx"; .\app.exe
+```
+
+与 4.1~4.5 的原生二进制运行方式相同，区别仅是自行编译产物，适合本地调试与二次开发。
 
 ---
 
@@ -407,6 +436,16 @@ docker run -d \
 cd online-creation-platform
 git pull
 go build -o app . && sudo systemctl restart online-creation
+```
+
+### 10.4 原生二进制（Windows / macOS）部署的升级
+
+重新下载 GitHub Releases 中的对应平台压缩包，覆盖解压目录后重启服务即可（`data/` 目录保留即不丢数据）：
+
+```bash
+# 以 macOS 为例：下载新包 → 解压覆盖 → 重启
+tar -xzf online-creation-darwin-arm64.tar.gz --overwrite -C /opt/online-creation-platform
+sudo systemctl restart online-creation   # 或直接重启你的服务方式
 ```
 
 ---

@@ -1,0 +1,97 @@
+name: Build Native Binaries (Windows / macOS / Linux)
+
+# 打 v* 标签（或手动触发）时，交叉编译各平台原生可执行文件并发布到 GitHub Release。
+# 用途：在未安装 Docker 的 Windows / macOS / Linux 上直接运行平台。
+# 说明：Docker 部署已通过 ghcr.io 镜像覆盖 amd64/arm64（Mac/Windows 的 Docker Desktop
+#       运行的是 Linux 容器，自动匹配对应架构）；本工作流提供的是“原生可执行文件”。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows
+            arch: amd64
+            ext: .exe
+          - os: windows
+            arch: arm64
+            ext: .exe
+          - os: darwin
+            arch: amd64
+            ext: ""
+          - os: darwin
+            arch: arm64
+            ext: ""
+          - os: linux
+            arch: amd64
+            ext: ""
+          - os: linux
+            arch: arm64
+            ext: ""
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist/package
+          go build -trimpath -ldflags "-s -w" -o dist/package/app${{ matrix.ext }} .
+          cp -r templates static dist/package/
+
+      - name: Package
+        run: |
+          cd dist
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            (cd package && zip -r ../online-creation-${{ matrix.os }}-${{ matrix.arch }}.zip .)
+          else
+            tar -czf online-creation-${{ matrix.os }}-${{ matrix.arch }}.tar.gz -C package .
+          fi
+          ls -lh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: online-creation-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/online-creation-${{ matrix.os }}-${{ matrix.arch }}.*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          ls -lh
+          # 首次发布：创建 Release 并上传附件；tag 已存在（重跑）时改为只上传
+          gh release create "${GITHUB_REF_NAME}" ./* \
+            --repo "${{ github.repository }}" \
+            --generate-notes \
+            || gh release upload "${GITHUB_REF_NAME}" ./* --repo "${{ github.repository }}"
