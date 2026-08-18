@@ -9,13 +9,21 @@ services:
     # 每次 up -d / pull 都强制拉取最新镜像，确保升级即时生效
     pull_policy: always
     ports:
-      - "8900:8900"
+      # 只绑定本机回环地址：应用仅能经 1Panel/OpenResty 反代访问，
+      # 防止公网绕过反代直连 8900 伪造 X-Forwarded-For 绕过限流。
+      # 若确实需要公网直连（不经反代），改回 "8900:8900" 并把下面的
+      # TRUST_PROXY_HEADERS 设为 false。
+      - "127.0.0.1:8900:8900"
     volumes:
       # 仅数据目录为持久卷（数据库 + 生成的图片）；
       # 静态资源与模板已打包进镜像，升级时自动同步，不再 bind-mount ./static
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
+      # 反代部署必开：让限流/系统日志使用真实客户端 IP（优先 X-Real-IP，
+      # 否则取 X-Forwarded-For 最后一段），否则所有用户共享反代地址、
+      # 会被一起限流误伤。可在同目录 .env 里设 TRUST_PROXY_HEADERS=false 覆盖。
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-true}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8900/health"]
       interval: 30s

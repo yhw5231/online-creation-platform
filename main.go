@@ -241,7 +241,10 @@ func secureCompare(a, b string) bool {
 
 // ------- Login brute-force throttling -------
 const (
-	loginMaxAttempts = 5
+	// 连续登录失败达到该次数后锁定该 IP。阈值放宽到 20 是为了避免
+	// NAT/公司校园网等共享出口 IP 下，少数几次输错密码就把整个网段的
+	// 用户锁在门外（此前为 5，实测误伤严重）。
+	loginMaxAttempts = 20
 	loginLockWindow  = 10 * time.Minute
 )
 
@@ -256,16 +259,28 @@ type loginFail struct {
 }
 
 // clientIP returns the client IP used as the throttle key. When the service
-// runs behind a reverse proxy, set TRUST_PROXY_HEADERS=true so the first
-// X-Forwarded-For entry is used instead of the proxy address — otherwise all
-// visitors share one lockout counter.
+// runs behind a reverse proxy, set TRUST_PROXY_HEADERS=true so the real
+// client IP is used instead of the proxy address — otherwise all visitors
+// share one lockout counter.
+//
+// 可信来源按以下顺序读取（均防客户端伪造）：
+//  1. X-Real-IP：nginx/OpenResty 用 proxy_set_header X-Real-IP $remote_addr
+//     把真实来源 IP 覆盖写进该头，客户端自带的同名头会被替换，无法伪造；
+//  2. X-Forwarded-For 的**最后一段**：nginx 的 $proxy_add_x_forwarded_for 把
+//     真实来源追加在末尾（形如"客户端伪造值..., 真实IP"），取末段即真实来源，
+//     兼容只设 XFF 未设 X-Real-IP 的反代；
+//  3. RemoteAddr 兜底。
 func clientIP(r *http.Request) string {
 	ip := r.RemoteAddr
 	if os.Getenv("TRUST_PROXY_HEADERS") == "true" {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			ip = strings.TrimSpace(strings.Split(xff, ",")[0])
-		} else if xff := r.Header.Get("X-Real-IP"); xff != "" {
-			ip = strings.TrimSpace(xff)
+		if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
+			ip = xrip
+		} else if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			ip = strings.TrimSpace(parts[len(parts)-1])
+			if ip == "" {
+				ip = r.RemoteAddr
+			}
 		}
 	}
 	if h, _, err := net.SplitHostPort(ip); err == nil {
@@ -315,12 +330,44 @@ func clearLoginFails(key string) {
 }
 
 // 通用防爆破：按 IP 的滑动窗口限流，覆盖登录/注册/兑换/改密等敏感 POST
-// 接口。登录接口除本限流外，另有独立的 5 次失败锁定 10 分钟机制
-// （loginMaxAttempts / loginLockWindow）。
+// 接口。计数以「客户端 IP + 接口路径」为键：同一个 IP 对每个接口拥有独立
+// 额度，登录/注册/兑换/改密互不挤占，超限返回 429——限流基准是 IP 而非
+// 接口被请求的总次数，避免单个出口 IP 的正常操作被其他动作拖累。
+// 登录接口除本限流外，另有独立的失败锁定机制（loginMaxAttempts /
+// loginLockWindow）。
+//
+// 注意：限流键是 IP，而服务器部署中多人可能共享同一 IP（未设
+// TRUST_PROXY_HEADERS=true 时全员共用反代地址；或 NAT/公司校园网/运营商
+// CGNAT 共享真实公网 IP）。阈值必须按"正常人不可能触发"的量级设置，否则
+// 共享 IP 下正常用户会被误伤——此前登录 30 次/分钟在多人共用时会被快速
+// 耗尽，导致用户"第一次登录就被限流"。
 const (
 	rateLimitWindow = time.Minute
-	rateLimitPerIP  = 10 // 每个 IP 每分钟允许的敏感请求数
+	// 各敏感接口每分钟每个 IP 的请求上限（滑动窗口，仅作极端异常兜底）。
+	rateLimitLogin    = 600 // 登录：600 次/分钟/IP（≈每秒 10 次，人肉不可能达到）
+	rateLimitRegister = 120 // 注册：120 次/分钟/IP
+	rateLimitRedeem   = 120 // 兑换：120 次/分钟/IP
+	rateLimitPassword = 120 // 修改密码：120 次/分钟/IP
+	rateLimitSetup    = 120 // Linux.do 完善账号：120 次/分钟/IP
 )
+
+// rateLimitForPath 返回指定敏感接口每分钟每 IP 的请求上限；未知路径使用
+// 兜底值，防止新增敏感接口时忘记配置额度而放开限制。
+func rateLimitForPath(path string) int {
+	switch path {
+	case "/login":
+		return rateLimitLogin
+	case "/register":
+		return rateLimitRegister
+	case "/redeem":
+		return rateLimitRedeem
+	case "/password":
+		return rateLimitPassword
+	case "/auth/linuxdo/setup":
+		return rateLimitSetup
+	}
+	return 60
+}
 
 var rateLimiter = struct {
 	sync.Mutex
@@ -353,11 +400,11 @@ func allowRateLimit(key string, limit int, window time.Duration) bool {
 	return false
 }
 
-// rateLimited 包裹敏感接口：POST 请求按 IP 限流，超限返回 429。
+// rateLimited 包裹敏感接口：POST 请求按「IP + 接口」限流，超限返回 429。
 // 异步请求返回 JSON，前端原地提示，不刷新页面。
 func rateLimited(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && !allowRateLimit(clientIP(r), rateLimitPerIP, rateLimitWindow) {
+		if r.Method == http.MethodPost && !allowRateLimit(clientIP(r)+"|"+r.URL.Path, rateLimitForPath(r.URL.Path), rateLimitWindow) {
 			log.Printf("rate limited: ip=%s path=%s", clientIP(r), r.URL.Path)
 			if ajaxRequest(r) {
 				writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{"ok": false, "error": "操作过于频繁，请稍后再试"})
@@ -447,6 +494,8 @@ func main() {
 	http.Handle("/images/", http.StripPrefix("/images/", http.FileServer(http.Dir("data/images"))))
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/admin/users", authMiddleware(adminMiddleware(adminUsersHandler)))
+	http.HandleFunc("/admin/records", authMiddleware(adminMiddleware(adminRecordsHandler)))
+	http.HandleFunc("/admin/records/delete", authMiddleware(adminMiddleware(adminRecordDeleteHandler)))
 	http.HandleFunc("/admin/user/disable", authMiddleware(adminMiddleware(adminUserDisableHandler)))
 	http.HandleFunc("/admin/user/enable", authMiddleware(adminMiddleware(adminUserEnableHandler)))
 	http.HandleFunc("/admin/user/promote", authMiddleware(adminMiddleware(adminUserPromoteHandler)))
@@ -2615,16 +2664,10 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || !verifyCSRF(r) {
-		http.Redirect(w, r, "/records", http.StatusSeeOther)
-		return
-	}
-	userID, _, _ := currentUser(r)
-	id := r.FormValue("id")
-	// 先收集该记录的全部归档图片路径与外部存储地址，再删除，避免残留文件/对象
-	var paths, remoteRefs []string
-	rowsP, _ := models.DB.Query("SELECT path, storage_path FROM generation_images WHERE record_id=?", id)
+// collectRecordAssets 收集一条创作记录的全部归档图片本地路径与外部存储
+// 引用（用于删除时清理文件/对象）。
+func collectRecordAssets(recordID string) (paths, remoteRefs []string) {
+	rowsP, _ := models.DB.Query("SELECT path, storage_path FROM generation_images WHERE record_id=?", recordID)
 	if rowsP != nil {
 		for rowsP.Next() {
 			var p, sp string
@@ -2639,6 +2682,36 @@ func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		rowsP.Close()
 	}
+	return paths, remoteRefs
+}
+
+// removeRecordAssets 删除创作记录对应的归档图片行、本地图片文件与外部存储
+// 对象（尽力而为：本地文件删除失败仅告警，POST 上传类型不支持远端删除时
+// 自然跳过），供用户端与管理端删除记录共用。
+func removeRecordAssets(recordID string, paths, remoteRefs []string) {
+	models.DB.Exec("DELETE FROM generation_images WHERE record_id=?", recordID)
+	for _, p := range paths {
+		if strings.HasPrefix(p, "/images/") {
+			os.Remove("data" + p)
+		}
+	}
+	if deleter, ok := getUploader().(services.RemoteDeleter); ok {
+		for _, ref := range remoteRefs {
+			if err := deleter.Delete(ref); err != nil {
+				log.Printf("remote delete failed for %s: %v", ref, err)
+			}
+		}
+	}
+}
+
+func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !verifyCSRF(r) {
+		http.Redirect(w, r, "/records", http.StatusSeeOther)
+		return
+	}
+	userID, _, _ := currentUser(r)
+	id := r.FormValue("id")
+	paths, remoteRefs := collectRecordAssets(id)
 	result, err := models.DB.Exec("DELETE FROM generation_records WHERE id=? AND user_id=?", id, userID)
 	if err != nil {
 		http.Error(w, "删除失败", http.StatusInternalServerError)
@@ -2648,21 +2721,7 @@ func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "记录不存在", http.StatusNotFound)
 		return
 	}
-	models.DB.Exec("DELETE FROM generation_images WHERE record_id=?", id)
-	for _, p := range paths {
-		if strings.HasPrefix(p, "/images/") {
-			os.Remove("data" + p)
-		}
-	}
-	// 同步删除外部存储对象（尽力而为：失败仅告警，不阻塞用户操作，
-	// POST 上传类型不支持远端删除时自然跳过）
-	if deleter, ok := getUploader().(services.RemoteDeleter); ok {
-		for _, ref := range remoteRefs {
-			if err := deleter.Delete(ref); err != nil {
-				log.Printf("remote delete failed for %s: %v", ref, err)
-			}
-		}
-	}
+	removeRecordAssets(id, paths, remoteRefs)
 	// 返回来源页，尽量保留分页与搜索条件
 	target := "/records"
 	if ref := r.Referer(); ref != "" {
@@ -2681,6 +2740,190 @@ func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	flashRedirect(w, r, target, "已删除该创作记录")
+}
+
+// adminRecordsHandler 创作记录审查页：展示所有用户的创作记录与生成图片，
+// 支持按提示词/用户名/状态筛选与分页，供管理员审查平台生成内容。
+func adminRecordsHandler(w http.ResponseWriter, r *http.Request) {
+	const perPage = 20
+	page := atoiDefault(r.URL.Query().Get("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	u := strings.TrimSpace(r.URL.Query().Get("u"))
+	s := strings.TrimSpace(r.URL.Query().Get("s"))
+
+	where := []string{}
+	args := []interface{}{}
+	if q != "" {
+		where = append(where, "g.prompt LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+likeEscape(q)+"%")
+	}
+	if u != "" {
+		where = append(where, "COALESCE(u.username,'') LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+likeEscape(u)+"%")
+	}
+	switch s {
+	case "success", "processing", "failed":
+		where = append(where, "g.status=?")
+		args = append(args, s)
+	}
+	clause := ""
+	if len(where) > 0 {
+		clause = " WHERE " + strings.Join(where, " AND ")
+	}
+	// 记录表 + 用户名（用户可能已注销，名称可能为空）
+	from := "generation_records g LEFT JOIN users u ON u.id=g.user_id"
+
+	var total, totalImages int
+	models.DB.QueryRow("SELECT COUNT(*) FROM "+from+clause, args...).Scan(&total)
+	// 配图总数：按筛选条件统计关联的归档图片行数
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_images gi INNER JOIN generation_records g ON g.id=gi.record_id LEFT JOIN users u ON u.id=g.user_id"+clause, args...).Scan(&totalImages)
+
+	totalPages := (total + perPage - 1) / perPage
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	rows, err := models.DB.Query("SELECT g.id, g.prompt, g.model, g.n, g.aspect_ratio, g.resolution, g.cost_points, g.status, g.image_url, g.error_msg, g.channel, g.created_at, COALESCE(u.username,'') FROM "+from+clause+" ORDER BY g.id DESC LIMIT ? OFFSET ?",
+		append(args, perPage, (page-1)*perPage)...)
+	if err != nil {
+		http.Error(w, "查询失败", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	recs := []map[string]interface{}{}
+	for rows.Next() {
+		var rec models.GenerationRecord
+		var errMsg, channel, username string
+		if err := rows.Scan(&rec.ID, &rec.Prompt, &rec.Model, &rec.N, &rec.AspectRatio, &rec.Resolution, &rec.CostPoints, &rec.Status, &rec.ImageURL, &errMsg, &channel, &rec.CreatedAt, &username); err == nil {
+			recs = append(recs, map[string]interface{}{
+				"ID":          rec.ID,
+				"Prompt":      rec.Prompt,
+				"Model":       rec.Model,
+				"N":           rec.N,
+				"AspectRatio": rec.AspectRatio,
+				"Resolution":  rec.Resolution,
+				"CostPoints":  rec.CostPoints,
+				"Status":      rec.Status,
+				"ImageURL":    rec.ImageURL,
+				"ErrorMsg":    errMsg,
+				"Channel":     channel,
+				"Username":    username,
+				"CreatedAt":   rec.CreatedAt.In(beijingTZ).Format("2006-01-02 15:04:05"),
+			})
+		}
+	}
+	// 拉取本页记录的全部归档图片（含外部存储地址，封面与多图回看用）
+	imgMap := map[int64][]string{}
+	altMap := map[int64][]string{}
+	subArgs := append(append([]interface{}{}, args...), perPage, (page-1)*perPage)
+	rowsI, err := models.DB.Query("SELECT record_id, path, storage_path FROM generation_images WHERE record_id IN (SELECT g.id FROM "+from+clause+" ORDER BY g.id DESC LIMIT ? OFFSET ?) ORDER BY record_id, idx", subArgs...)
+	if err == nil {
+		defer rowsI.Close()
+		for rowsI.Next() {
+			var rid int64
+			var p, sp string
+			if rowsI.Scan(&rid, &p, &sp) == nil {
+				if p != "" {
+					imgMap[rid] = append(imgMap[rid], p)
+				} else if sp != "" {
+					imgMap[rid] = append(imgMap[rid], sp)
+				}
+				if sp != "" {
+					altMap[rid] = append(altMap[rid], sp)
+				}
+			}
+		}
+	}
+	for _, rec := range recs {
+		paths := imgMap[rec["ID"].(int64)]
+		rec["Images"] = paths
+		if len(paths) > 1 {
+			rec["ImagesSub"] = paths[1:]
+		} else {
+			rec["ImagesSub"] = []string{}
+		}
+		rec["AltURLs"] = altMap[rec["ID"].(int64)]
+	}
+	// 分页链接携带当前筛选条件（& 结尾，方便直接拼 page=）
+	pageBase := "/admin/records?"
+	var parts []string
+	for k, v := range map[string]string{"q": q, "u": u, "s": s} {
+		if v != "" {
+			parts = append(parts, k+"="+url.QueryEscape(v))
+		}
+	}
+	if len(parts) > 0 {
+		pageBase += strings.Join(parts, "&") + "&"
+	}
+	renderPage(w, r, "layout.html", map[string]interface{}{
+		"Title":        "创作记录审查",
+		"Records":      recs,
+		"Total":        total,
+		"TotalImages":  totalImages,
+		"Query":        q,
+		"UserFilter":   u,
+		"StatusFilter": s,
+		"QStatus":      s,
+		"Page":         page,
+		"TotalPages":   totalPages,
+		"HasPrev":      page > 1,
+		"HasNext":      page < totalPages,
+		"PrevPage":     page - 1,
+		"NextPage":     page + 1,
+		"PageBase":     pageBase,
+		"Content":      "content-admin-records",
+	})
+}
+
+// adminRecordsBack 返回创作记录审查列表 URL，保留当前筛选条件
+// （提示词 q / 用户名 u / 状态 s / 页码 page），供删除后回跳。
+func adminRecordsBack(r *http.Request) string {
+	target := "/admin/records"
+	if ref := r.Referer(); ref != "" {
+		if u, err := url.Parse(ref); err == nil {
+			qp := u.Query()
+			seps := "?"
+			for _, k := range []string{"q", "u", "s"} {
+				if v := qp.Get(k); v != "" {
+					target += seps + k + "=" + url.QueryEscape(v)
+					seps = "&"
+				}
+			}
+			if p := qp.Get("page"); p != "" {
+				target += seps + "page=" + p
+			}
+		}
+	}
+	return target
+}
+
+// adminRecordDeleteHandler 管理端删除任意用户的创作记录，连带清理归档图片
+// 行、本地图片文件与外部存储对象。
+func adminRecordDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !verifyCSRF(r) {
+		http.Redirect(w, r, "/admin/records", http.StatusSeeOther)
+		return
+	}
+	adminID, adminName, _ := currentUser(r)
+	id := r.FormValue("id")
+	paths, remoteRefs := collectRecordAssets(id)
+	result, err := models.DB.Exec("DELETE FROM generation_records WHERE id=?", id)
+	if err != nil {
+		http.Error(w, "删除失败", http.StatusInternalServerError)
+		return
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		http.Error(w, "记录不存在", http.StatusNotFound)
+		return
+	}
+	removeRecordAssets(id, paths, remoteRefs)
+	log.Printf("admin deleted record: id=%s admin=%s(%d)", id, adminName, adminID)
+	flashRedirect(w, r, adminRecordsBack(r), "已删除该创作记录")
 }
 
 // renderRedeem 渲染积分兑换页。错误（msgType=="error"）以红色文字显示在兑换码
@@ -4900,11 +5143,20 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session := rotateSession(w, r)
+		// store.New 会从请求 cookie 重新解码旧值，这里清掉 OAuth 一次性状态，
+		// 避免残留到新会话。
+		delete(session.Values, "oauth_state")
+		delete(session.Values, "oauth_next")
+		delete(session.Values, "oauth_mode")
 		session.Values["userID"] = user.ID
 		session.Values["username"] = user.Username
 		session.Values["role"] = user.Role
+		// 一次性 toast 直接写在旋转后的新会话上。不能用 flashRedirect/setFlash：
+		// 它们内部 store.Get 会从请求 registry 取回已被旋转（MaxAge=-1）的旧会话
+		// 并回写，覆盖刚生成的新登录会话 cookie，导致登录后仍被弹回登录页。
+		session.Values["flash_toast"] = "欢迎回来，" + user.Username
 		session.Save(r, w)
-		flashRedirect(w, r, oauthTarget(next), "欢迎回来，"+user.Username)
+		http.Redirect(w, r, oauthTarget(next), http.StatusSeeOther)
 		return
 	}
 	// 首次使用 Linux.do 登录：需开放注册且开放第三方注册，方可创建新账号
@@ -5051,13 +5303,20 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 		s.Values["userID"] = uid
 		s.Values["username"] = username
 		s.Values["role"] = "user"
+		// 一次性 toast 直接写在旋转后的新会话上。不能用 setFlash/flashRedirect：
+		// 它们内部 store.Get 会从请求 registry 取回已被旋转（MaxAge=-1）的旧会话
+		// 并回写，覆盖刚生成的新登录会话 cookie，导致注册后仍被弹回登录页。
+		// store.New 从请求 cookie 解码出旧值，这里也清掉 OAuth pending 残留。
+		delete(s.Values, "oauth_pending_user_id")
+		delete(s.Values, "oauth_pending_username")
+		delete(s.Values, "oauth_pending_next")
+		s.Values["flash_toast"] = "注册成功，欢迎加入，" + username
 		s.Save(r, w)
 		if ajaxRequest(r) {
-			setFlash(w, r, "注册成功，欢迎加入，"+username)
 			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "redirect": oauthTarget(next)})
 			return
 		}
-		flashRedirect(w, r, oauthTarget(next), "注册成功，欢迎加入，"+username)
+		http.Redirect(w, r, oauthTarget(next), http.StatusSeeOther)
 		return
 	}
 

@@ -14,6 +14,7 @@
         {{else if eq .Content "content-redeem"}}{{template "content-redeem" .}}
         {{else if eq .Content "content-checkin"}}{{template "content-checkin" .}}
         {{else if eq .Content "content-users"}}{{template "content-users" .}}
+        {{else if eq .Content "content-admin-records"}}{{template "content-admin-records" .}}
         {{else if eq .Content "content-dashboard"}}{{template "content-dashboard" .}}
         {{else if eq .Content "content-settings"}}{{template "content-settings" .}}
         {{else if eq .Content "content-admin-logs"}}{{template "content-admin-logs" .}}
@@ -115,6 +116,7 @@
                     <ul class="dropdown-menu dropdown-menu-lg-end shadow">
                         <li><a class="dropdown-item" href="/admin">数据概览</a></li>
                         <li><a class="dropdown-item" href="/admin/users">用户管理</a></li>
+                        <li><a class="dropdown-item" href="/admin/records">创作记录审查</a></li>
                         <li><a class="dropdown-item" href="/admin/redeem-codes">兑换码管理</a></li>
                         <li><a class="dropdown-item" href="/admin/notices">公告管理</a></li>
                         <li><a class="dropdown-item" href="/admin/settings">系统设置</a></li>

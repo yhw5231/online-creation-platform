@@ -100,7 +100,8 @@ SESSION_SECRET=请替换为至少16位的随机字符串
 # HTTPS 部署时设为 true（见第 8 节）
 COOKIE_SECURE=false
 
-# 反向代理部署时设为 true，登录限流改用 X-Forwarded-For 真实 IP
+# 反向代理部署时设为 true，登录限流改用真实客户端 IP
+# （优先 X-Real-IP，否则取 X-Forwarded-For 最后一段，均防伪造）
 TRUST_PROXY_HEADERS=false
 
 # 时区
@@ -255,7 +256,7 @@ SESSION_SECRET=xxx ./app # 或 Windows: $env:SESSION_SECRET="xxx"; .\app.exe
 | `PORT` | 监听端口 | `8900` |
 | `SESSION_SECRET` | 会话签名密钥（建议 ≥16 位随机串）。不设置时首次启动自动生成随机密钥并存入 `data/.session_secret` 复用；**已部署实例更换密钥会使所有已登录会话失效** | 自动生成 |
 | `COOKIE_SECURE` | 设为 `true` 时仅通过 HTTPS 下发会话 Cookie（未配 HTTPS 时勿开，会导致登录不生效） | `false` |
-| `TRUST_PROXY_HEADERS` | 反向代理部署时设为 `true`，登录限流改用 `X-Forwarded-For` 真实客户端 IP（防代理后所有人共享一个 IP 被一起锁死） | `false` |
+| `TRUST_PROXY_HEADERS` | 反向代理部署时设为 `true`，登录限流改用真实客户端 IP（优先 `X-Real-IP`，否则取 `X-Forwarded-For` **最后一段**——nginx 用 `$proxy_add_x_forwarded_for` 把真实来源追加在末尾，客户端伪造的前段值无法绕过限流；防代理后所有人共享一个 IP 被一起锁死） | `false` |
 | `TZ` | 时区（Docker 环境变量中已默认 `Asia/Shanghai`） | 系统时区 |
 
 ---
@@ -367,7 +368,7 @@ server {
 | 变量 | 值 | 原因 |
 |------|-----|------|
 | `COOKIE_SECURE` | `true` | 仅通过 HTTPS 下发 Cookie |
-| `TRUST_PROXY_HEADERS` | `true` | 登录限流使用真实客户端 IP |
+| `TRUST_PROXY_HEADERS` | `true` | 登录限流使用真实客户端 IP（优先 `X-Real-IP`，否则取 `X-Forwarded-For` 最后一段） |
 
 > 证书申请（Let's Encrypt）：`sudo apt install certbot python3-certbot-nginx && sudo certbot --nginx -d 你的域名.com`。
 
@@ -458,7 +459,7 @@ sudo systemctl restart online-creation   # 或直接重启你的服务方式
 | 现象 | 原因与处理 |
 |------|-----------|
 | 页面能打开但无法登录 | ① 检查 `SESSION_SECRET` 是否为空（日志 WARN 提示）；② 检查是否误开 `COOKIE_SECURE=true` 且未走 HTTPS，改回 `false` 或配置 HTTPS 后重启 |
-| 注册/登录后提示输入框被限流 | 反向代理未设 `TRUST_PROXY_HEADERS=true`，所有用户共用一个 IP 触发锁；或确实连续失败 5 次（锁 10 分钟） |
+| 注册/登录后提示输入框被限流 | 反向代理未设 `TRUST_PROXY_HEADERS=true`，所有用户共用一个 IP 触发锁；或同一 IP 连续失败 20 次（锁 10 分钟）。限流阈值已放宽到"正常人不可能触发"的量级，正常使用不会触发 |
 | 生成任务一直失败 | 检查后台「图片生成接口」渠道的 API 地址 / Key / 模型是否正确；查看日志中的上游错误详情（已裁剪至 300 字符便于排查） |
 | 容器日志出现 `cannot persist session key` | 数据目录权限：`sudo chown -R 1000:1000 data`，或显式设置 `SESSION_SECRET` |
 | 磁盘空间不足 | 删除无用的创作记录（后台或用户端删除会连带清理本地图片文件），定期清理 `data/images/` |
@@ -476,4 +477,4 @@ sudo systemctl restart online-creation   # 或直接重启你的服务方式
 5. **数据库与图片目录**：`data/` 不要暴露给 Web 直接访问（本平台仅通过受控路由读取，勿将 data 目录放到 Nginx 静态根下）。
 6. **定期备份**：见 [9.1 数据备份](#91-数据备份)。
 7. **关注日志**：登录限流日志会记录暴力尝试来源 IP，异常时及时处置。
-8. **防爆破/限流（内置）**：登录连续失败 5 次锁定该 IP 10 分钟；登录、注册、积分兑换、修改密码、OAuth 绑定等敏感 POST 均按 IP 滑动窗口限流（默认每 IP 每分钟 10 次，超限返回 429）。反向代理部署时务必设置 `TRUST_PROXY_HEADERS=true`（见第 5 节），否则所有访客共享代理地址、限流会误伤。兑换码/注册码为 32 位随机字符（大写字母+数字，不含易混淆字符），不可枚举，请勿手动缩短。
+8. **防爆破/限流（内置）**：登录连续失败 20 次锁定该 IP 10 分钟；登录、注册、积分兑换、修改密码、OAuth 绑定等敏感 POST 均按「IP + 接口」滑动窗口限流（每个 IP 每分钟：登录 600 次、注册/兑换/改密/完善账号各 120 次——阈值按"正常人不可能触发"的量级设置，基本不会误伤正常用户，仅作极端异常兜底；各接口额度独立互不挤占，超限返回 429）。限流基准是客户端 IP，不是接口被请求的总次数。反向代理部署时务必设置 `TRUST_PROXY_HEADERS=true`（见第 5 节），否则所有访客共享代理地址、限流会误伤。兑换码/注册码为 32 位随机字符（大写字母+数字，不含易混淆字符），不可枚举，请勿手动缩短。

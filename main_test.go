@@ -137,6 +137,42 @@ func TestClientIP(t *testing.T) {
 	if got := clientIP(r); got != "192.168.1.10" {
 		t.Errorf("clientIP without port = %q", got)
 	}
+
+	// 开启代理信任：X-Real-IP 优先（nginx 覆盖式设置，客户端伪造的 XFF 前段被忽略）
+	t.Setenv("TRUST_PROXY_HEADERS", "true")
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.RemoteAddr = "10.0.0.5:8080"
+	r2.Header.Set("X-Real-IP", "198.51.100.20")
+	r2.Header.Set("X-Forwarded-For", "6.6.6.6, 198.51.100.20")
+	if got := clientIP(r2); got != "198.51.100.20" {
+		t.Errorf("clientIP with X-Real-IP = %q, want 198.51.100.20", got)
+	}
+
+	// 无 X-Real-IP 时取 XFF 最后一段：nginx 的 $proxy_add_x_forwarded_for 把真实
+	// 来源追加在末尾，客户端伪造的前段值不会绕过限流
+	r3 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r3.RemoteAddr = "10.0.0.5:8080"
+	r3.Header.Set("X-Forwarded-For", "6.6.6.6, 198.51.100.21")
+	if got := clientIP(r3); got != "198.51.100.21" {
+		t.Errorf("clientIP last XFF entry = %q, want 198.51.100.21", got)
+	}
+	// XFF 末段为空时回退 RemoteAddr
+	r3b := httptest.NewRequest(http.MethodGet, "/", nil)
+	r3b.RemoteAddr = "10.0.0.5:8080"
+	r3b.Header.Set("X-Forwarded-For", "6.6.6.6,")
+	if got := clientIP(r3b); got != "10.0.0.5" {
+		t.Errorf("clientIP empty XFF tail = %q, want 10.0.0.5", got)
+	}
+
+	// 未开启信任时忽略代理头
+	t.Setenv("TRUST_PROXY_HEADERS", "")
+	r4 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r4.RemoteAddr = "10.0.0.5:8080"
+	r4.Header.Set("X-Forwarded-For", "6.6.6.6, 198.51.100.22")
+	r4.Header.Set("X-Real-IP", "198.51.100.22")
+	if got := clientIP(r4); got != "10.0.0.5" {
+		t.Errorf("clientIP without trust = %q, want 10.0.0.5", got)
+	}
 }
 
 // TestLoginLockout 验证登录失败锁定：连续失败达到阈值后锁定，
@@ -163,30 +199,46 @@ func TestLoginLockout(t *testing.T) {
 }
 
 // TestRateLimit 验证按 IP 的滑动窗口限流：同 IP 超限后敏感 POST 返回 429，
-// 其他 IP 不受影响，GET 请求不计数。
+// 其他 IP 不受影响，GET 请求不计数，且不同敏感接口的额度互相独立
+// （限流基准是「IP + 接口」，而不是接口被请求的总次数）。
 func TestRateLimit(t *testing.T) {
 	h := rateLimited(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	post := func(ip string) int {
+	post := func(ip, path string) int {
 		ww := httptest.NewRecorder()
-		rr := httptest.NewRequest(http.MethodPost, "/", nil)
+		rr := httptest.NewRequest(http.MethodPost, path, nil)
 		rr.RemoteAddr = ip
 		h(ww, rr)
 		return ww.Code
 	}
-	for i := 0; i < rateLimitPerIP; i++ {
-		if code := post("203.0.113.9:1234"); code != http.StatusOK {
+	// 登录接口额度内全部放行（已放宽至 600 次/分钟/IP，正常使用不可能触发）
+	for i := 0; i < rateLimitLogin; i++ {
+		if code := post("203.0.113.9:1234", "/login"); code != http.StatusOK {
 			t.Fatalf("request %d blocked early: %d", i+1, code)
 		}
 	}
-	if code := post("203.0.113.9:1234"); code != http.StatusTooManyRequests {
+	if code := post("203.0.113.9:1234", "/login"); code != http.StatusTooManyRequests {
 		t.Errorf("over-limit request = %d, want 429", code)
 	}
-	if code := post("198.51.100.7:1"); code != http.StatusOK {
+	// 其他 IP 不受影响
+	if code := post("198.51.100.7:1", "/login"); code != http.StatusOK {
 		t.Errorf("other IP should pass, got %d", code)
+	}
+	// 同一 IP 下其他敏感接口额度独立：登录打满不影响注册
+	if code := post("203.0.113.9:1234", "/register"); code != http.StatusOK {
+		t.Errorf("register should have independent budget, got %d", code)
+	}
+	// 注册额度同样按上限拦截（不与登录共享计数）
+	for i := 0; i < rateLimitRegister-1; i++ {
+		if code := post("203.0.113.9:1234", "/register"); code != http.StatusOK {
+			t.Fatalf("register request %d blocked early: %d", i+2, code)
+		}
+	}
+	if code := post("203.0.113.9:1234", "/register"); code != http.StatusTooManyRequests {
+		t.Errorf("register over-limit = %d, want 429", code)
 	}
 	// GET 不计入限流
 	ww := httptest.NewRecorder()
-	rr := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRequest(http.MethodGet, "/login", nil)
 	rr.RemoteAddr = "203.0.113.9:1234"
 	h(ww, rr)
 	if ww.Code != http.StatusOK {
@@ -194,9 +246,10 @@ func TestRateLimit(t *testing.T) {
 	}
 	// 窗口过期后恢复
 	rateLimiter.Lock()
-	delete(rateLimiter.hits, "203.0.113.9")
+	delete(rateLimiter.hits, "203.0.113.9|/login")
+	delete(rateLimiter.hits, "203.0.113.9|/register")
 	rateLimiter.Unlock()
-	if code := post("203.0.113.9:1234"); code != http.StatusOK {
+	if code := post("203.0.113.9:1234", "/login"); code != http.StatusOK {
 		t.Errorf("fresh window should allow, got %d", code)
 	}
 }
@@ -533,6 +586,183 @@ func TestFetchLinuxdoUser(t *testing.T) {
 	linuxdoUserInfoURL = badSrv.URL
 	if _, _, _, err := fetchLinuxdoUser("tok"); err == nil {
 		t.Error("expected JSON parse error, got nil")
+	}
+}
+
+// TestOAuthLoginAutoEnter 验证 Linux.do 第三方登录的完整闭环：
+// 已注册用户走回调登录后，最终 Set-Cookie 必须是携带 userID 的新登录会话，
+// 直接进入网站（而不是被旋转掉的旧会话覆盖、弹回登录页）。
+func TestOAuthLoginAutoEnter(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "oauthlogin.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+
+	tokSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"tok-1"}`))
+	}))
+	defer tokSrv.Close()
+	infoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer tok-1" {
+			t.Errorf("Authorization = %q, want Bearer tok-1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":424242,"username":"lduser","email":"u@example.com"}`))
+	}))
+	defer infoSrv.Close()
+	oldTok, oldInfo := linuxdoTokenURL, linuxdoUserInfoURL
+	linuxdoTokenURL, linuxdoUserInfoURL = tokSrv.URL, infoSrv.URL
+	defer func() { linuxdoTokenURL, linuxdoUserInfoURL = oldTok, oldInfo }()
+
+	models.SetConfig("enable_thirdparty_login", "true")
+	models.SetConfig("linuxdo_client_id", "cid")
+	models.SetConfig("linuxdo_client_secret", "csec")
+	models.SetConfig("linuxdo_redirect_uri", "")
+	res, _ := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id) VALUES(?,?,?,?,?,?,?)",
+		"lduser", "x", 0, "user", 1, "linuxdo", "424242")
+	uid, _ := res.LastInsertId()
+
+	// 模拟用户在登录页点了 Linux.do 授权：会话先持有 state/next
+	w0 := httptest.NewRecorder()
+	r0 := httptest.NewRequest(http.MethodGet, "/", nil)
+	pre, _ := store.New(r0, "session")
+	pre.Values["oauth_state"] = "teststate123"
+	pre.Values["oauth_next"] = "/create"
+	pre.Save(r0, w0)
+	preCookie := lastCookie(w0)
+
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/callback?code=abc123&state=teststate123", nil)
+	rr.Header.Set("Cookie", preCookie)
+	linuxdoCallbackHandler(ww, rr)
+
+	if ww.Code != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, want 303", ww.Code)
+	}
+	if loc := ww.Header().Get("Location"); loc != "/create" {
+		t.Errorf("callback Location = %q, want /create", loc)
+	}
+	// 核心回归断言：最终会话 cookie 必须能解出 userID（旧实现被 flash 回写覆盖后缺失）
+	finalCookie := lastCookie(ww)
+	rCheck := httptest.NewRequest(http.MethodGet, "/create", nil)
+	rCheck.Header.Set("Cookie", finalCookie)
+	sCheck, _ := store.Get(rCheck, "session")
+	if v, _ := sCheck.Values["userID"].(int64); v != uid {
+		t.Errorf("final session userID = %v, want %d (cookie=%s)", sCheck.Values["userID"], uid, truncateRunes(finalCookie, 200))
+	}
+	if v, _ := sCheck.Values["flash_toast"].(string); !strings.Contains(v, "欢迎回来") {
+		t.Errorf("final session flash missing welcome toast: %q", v)
+	}
+	if _, ok := sCheck.Values["oauth_state"]; ok {
+		t.Error("oauth_state should be cleaned from the rotated login session")
+	}
+}
+
+// TestOAuthSetupAutoEnter 验证 Linux.do 首次注册（完善账号表单）提交成功后：
+// 最终 Set-Cookie 必须携带 userID，注册完成直接进入网站，且 JSON/普通两种
+// 提交方式行为一致。
+func TestOAuthSetupAutoEnter(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "oauthsetup.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	models.SetConfig("open_registration", "true")
+	models.SetConfig("enable_thirdparty_registration", "true")
+	models.SetConfig("require_reg_code", "false")
+	models.SetConfig("initial_points", "0")
+
+	// 模拟回调后进入 setup 页：会话持有 pending 数据与 CSRF
+	buildPending := func(prefix string) (string, string) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/setup", nil)
+		s, _ := store.New(r, "session")
+		s.Values["oauth_pending_user_id"] = int64(777001)
+		s.Values["oauth_pending_username"] = "ld_" + prefix
+		s.Values["oauth_pending_next"] = "/create"
+		s.Save(r, w)
+		c := lastCookie(w)
+		r2 := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/setup", nil)
+		r2.Header.Set("Cookie", c)
+		csrf := csrfToken(w, r2)
+		return csrf, lastCookie(w)
+	}
+
+	// 1) 普通表单提交（非 ajax）→ 303 直接进站，新会话带 userID
+	csrf, pendCookie := buildPending("plain")
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodPost, "/auth/linuxdo/setup", strings.NewReader(url.Values{
+		"_csrf":    {csrf},
+		"username": {"ld_plain"},
+		"password": {"123456"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", pendCookie)
+	linuxdoSetupHandler(ww, rr)
+	if ww.Code != http.StatusSeeOther {
+		t.Fatalf("setup(plain) status = %d, want 303: %s", ww.Code, truncateRunes(ww.Body.String(), 200))
+	}
+	if loc := ww.Header().Get("Location"); loc != "/create" {
+		t.Errorf("setup(plain) Location = %q, want /create", loc)
+	}
+	finalPlain := lastCookie(ww)
+	rCk := httptest.NewRequest(http.MethodGet, "/create", nil)
+	rCk.Header.Set("Cookie", finalPlain)
+	sCk, _ := store.Get(rCk, "session")
+	if v, _ := sCk.Values["userID"].(int64); v == 0 {
+		t.Errorf("setup(plain) final session missing userID (cookie=%s)", truncateRunes(finalPlain, 200))
+	} else {
+		var dbName string
+		models.DB.QueryRow("SELECT username FROM users WHERE id=?", v).Scan(&dbName)
+		if dbName != "ld_plain" {
+			t.Errorf("setup(plain) logged-in user mismatch: %q", dbName)
+		}
+	}
+	if v, _ := sCk.Values["flash_toast"].(string); !strings.Contains(v, "欢迎加入") {
+		t.Errorf("setup(plain) flash missing: %q", v)
+	}
+	if _, ok := sCk.Values["oauth_pending_user_id"]; ok {
+		t.Error("oauth_pending_user_id should be cleaned from the final session")
+	}
+
+	// 2) ajax 提交 → JSON ok + redirect，新会话同样带 userID
+	csrf2, pendCookie2 := buildPending("ajax")
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/auth/linuxdo/setup", strings.NewReader(url.Values{
+		"_csrf":    {csrf2},
+		"username": {"ld_ajax"},
+		"password": {"123456"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", pendCookie2)
+	rr.Header.Set("X-Requested-With", "XMLHttpRequest")
+	linuxdoSetupHandler(ww, rr)
+	var ajaxResp struct {
+		OK       bool   `json:"ok"`
+		Redirect string `json:"redirect"`
+	}
+	if err := json.Unmarshal(ww.Body.Bytes(), &ajaxResp); err != nil {
+		t.Fatalf("setup(ajax) not JSON: %v (%s)", err, truncateRunes(ww.Body.String(), 200))
+	}
+	if !ajaxResp.OK || ajaxResp.Redirect != "/create" {
+		t.Errorf("setup(ajax) response = %+v", ajaxResp)
+	}
+	finalAjax := lastCookie(ww)
+	rCk2 := httptest.NewRequest(http.MethodGet, "/create", nil)
+	rCk2.Header.Set("Cookie", finalAjax)
+	sCk2, _ := store.Get(rCk2, "session")
+	if v, _ := sCk2.Values["userID"].(int64); v == 0 {
+		t.Errorf("setup(ajax) final session missing userID (cookie=%s)", truncateRunes(finalAjax, 200))
 	}
 }
 
@@ -1646,6 +1876,121 @@ func TestRecordsTotalCostExcludesFailed(t *testing.T) {
 	}
 	if !strings.Contains(seg, "<strong class=\"text-danger\">20</strong>") {
 		t.Errorf("累计消耗应精确显示为 20：%s", seg)
+	}
+}
+
+// TestAdminRecordsReview 验证管理端创作记录审查页：展示所有用户的创作记录
+// 与生成图片（含配图统计），支持按状态筛选，并支持管理员删除任意记录
+// （连带清理归档图片行）。
+func TestAdminRecordsReview(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	// 页面渲染依赖全局模板
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, points INTEGER DEFAULT 0, role TEXT DEFAULT 'user', status INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, model TEXT,
+		n INTEGER DEFAULT 1, aspect_ratio TEXT, resolution TEXT, response_format TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT, error_msg TEXT,
+		channel TEXT, nsfw INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0,
+		path TEXT DEFAULT '', storage_type TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
+	// InitDB 会种子化默认管理员（id=1），测试用户使用独立 ID
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, role, status) VALUES(100,'alice','x','user',1)")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, role, status) VALUES(101,'bob','x','user',1)")
+	models.DB.Exec(`INSERT INTO generation_records(user_id, prompt, cost_points, status, image_url) VALUES
+		(100,'星空图',10,'success','/images/a.png'),
+		(101,'失败作',10,'failed','')`)
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/a.png')")
+
+	// 管理员会话浏览审查页
+	render := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		s, _ := store.Get(req, "session")
+		s.Values["userID"] = int64(9)
+		s.Values["username"] = "admin"
+		s.Values["role"] = "admin"
+		w0 := httptest.NewRecorder()
+		s.Save(req, w0)
+		w := httptest.NewRecorder()
+		adminRecordsHandler(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("admin records status=%d body=%s", w.Code, truncateRunes(w.Body.String(), 200))
+		}
+		return w.Body.String()
+	}
+
+	body := render("/admin/records")
+	for _, want := range []string{"创作记录审查", "alice", "bob", "星空图", "失败作", "/images/a.png"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("review page missing %q (len=%d)", want, len(body))
+		}
+	}
+	if !strings.Contains(body, "归档图片") || !strings.Contains(body, "1 张") {
+		t.Errorf("review page should count archived images, got: %s", truncateRunes(body, 300))
+	}
+
+	// 状态筛选：只看失败
+	b2 := render("/admin/records?s=failed")
+	if !strings.Contains(b2, "失败作") || strings.Contains(b2, "星空图") {
+		t.Errorf("status filter failed: %s", truncateRunes(b2, 300))
+	}
+	// 用户名筛选：只看 bob
+	b3 := render("/admin/records?u=bob")
+	if !strings.Contains(b3, "失败作") || strings.Contains(b3, "星空图") {
+		t.Errorf("username filter failed: %s", truncateRunes(b3, 300))
+	}
+
+	// 管理端删除：先取带 CSRF 的会话 cookie
+	preW := httptest.NewRecorder()
+	preR := httptest.NewRequest(http.MethodGet, "/admin/records", nil)
+	preS, _ := store.New(preR, "session")
+	preS.Values["userID"] = int64(9)
+	preS.Values["username"] = "admin"
+	preS.Values["role"] = "admin"
+	preS.Save(preR, preW)
+	preCookie := lastCookie(preW)
+	csrfR := httptest.NewRequest(http.MethodGet, "/", nil)
+	csrfR.Header.Set("Cookie", preCookie)
+	csrf := csrfToken(preW, csrfR)
+	cookie := lastCookie(preW)
+
+	delW := httptest.NewRecorder()
+	delR := httptest.NewRequest(http.MethodPost, "/admin/records/delete", strings.NewReader(url.Values{
+		"_csrf": {csrf},
+		"id":    {"2"},
+	}.Encode()))
+	delR.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	delR.Header.Set("Cookie", cookie)
+	delR.Header.Set("Referer", "http://x/admin/records?s=failed")
+	adminRecordDeleteHandler(delW, delR)
+	if delW.Code != http.StatusSeeOther {
+		t.Fatalf("admin delete status=%d body=%s", delW.Code, truncateRunes(delW.Body.String(), 200))
+	}
+	if loc := delW.Header().Get("Location"); loc != "/admin/records?s=failed" {
+		t.Errorf("delete back Location = %q, want /admin/records?s=failed", loc)
+	}
+	var n int
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE id=2").Scan(&n)
+	if n != 0 {
+		t.Error("admin delete should remove the record")
+	}
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_images WHERE record_id=2").Scan(&n)
+	if n != 0 {
+		t.Error("admin delete should remove image rows")
 	}
 }
 
