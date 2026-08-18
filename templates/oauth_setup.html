@@ -33,13 +33,6 @@
                     <div class="pw-meter-text small"></div>
                 </div>
             </div>
-            <div class="mb-3">
-                <label class="form-label fw-semibold">确认密码</label>
-                <div class="input-group">
-                    <input type="password" name="confirm_password" id="setupConfirm" class="form-control" placeholder="再次输入密码" required autocomplete="new-password">
-                    <button type="button" class="btn btn-outline-secondary pwd-toggle" data-target="setupConfirm" tabindex="-1">显示</button>
-                </div>
-            </div>
             {{if .RequireRegCode}}
             <div class="mb-4">
                 <label class="form-label fw-semibold">注册码 <span class="text-danger">*</span></label>

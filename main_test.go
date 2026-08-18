@@ -246,9 +246,16 @@ func TestIsSafeLocalPath(t *testing.T) {
 }
 
 func TestLocalTime(t *testing.T) {
-	// parseable UTC -> returns a non-empty localized string (not raw passthrough unless tz is UTC)
-	if out := localTime("2026-01-02 15:04:05"); out == "not-a-time" {
-		t.Fatal("unreachable")
+	// legacy space format (UTC) -> Beijing time, with seconds
+	if out := localTime("2026-01-02 15:04:05"); out != "2026-01-02 23:04:05" {
+		t.Errorf("localTime(legacy) = %q, want %q (Beijing)", out, "2026-01-02 23:04:05")
+	}
+	// new driver ISO-8601 format (e.g. 2026-08-14T02:03:18Z) -> Beijing time
+	if out := localTime("2026-08-14T02:03:18Z"); out != "2026-08-14 10:03:18" {
+		t.Errorf("localTime(iso) = %q, want %q (Beijing)", out, "2026-08-14 10:03:18")
+	}
+	if out := localTime("2026-08-14T02:03:18.123Z"); out != "2026-08-14 10:03:18" {
+		t.Errorf("localTime(iso fractional) = %q, want %q (Beijing)", out, "2026-08-14 10:03:18")
 	}
 	// unparseable -> passthrough
 	raw := "not-a-time"

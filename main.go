@@ -2300,7 +2300,7 @@ func cleanUpTask() {
 	rows, err := models.DB.Query(`SELECT gr.id, gi.path, gi.storage_path
 		FROM generation_records gr
 		LEFT JOIN generation_images gi ON gi.record_id = gr.id
-		WHERE gr.created_at < ? AND gr.status = 'success'`, cutoff.Format("2006-01-02 15:04:05"))
+		WHERE julianday(gr.created_at) < julianday(?) AND gr.status = 'success'`, cutoff.UTC().Format(time.RFC3339))
 	if err == nil {
 		type doomed struct {
 			rid   int64
@@ -2545,7 +2545,7 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 				"ImageURL":    rec.ImageURL,
 				"ErrorMsg":    errMsg,
 				"Channel":     channel,
-				"CreatedAt":   rec.CreatedAt.Local().Format("2006-01-02 15:04"),
+				"CreatedAt":   rec.CreatedAt.In(beijingTZ).Format("2006-01-02 15:04:05"),
 			})
 		}
 	}
@@ -3144,7 +3144,7 @@ func adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 				Points:    u.Points,
 				Role:      u.Role,
 				Status:    u.Status,
-				CreatedAt: u.CreatedAt.Local().Format("2006-01-02 15:04"),
+				CreatedAt: u.CreatedAt.In(beijingTZ).Format("2006-01-02 15:04:05"),
 			})
 		}
 	}
@@ -4421,12 +4421,33 @@ func pagesAround(page, total int) []int {
 	return out
 }
 
-// localTime parses a SQLite CURRENT_TIMESTAMP string (UTC, "2006-01-02 15:04:05")
-// and reformats it in the server's local timezone, falling back to the raw
-// value when parsing fails (e.g. legacy free-form data).
-func localTime(s string) string {
+// beijingTZ 为北京时间时区（UTC+8）。中国不使用夏令时，用固定偏移即可，
+// 避免依赖服务器系统时区或 tzdata。
+var beijingTZ = time.FixedZone("CST", 8*60*60)
+
+// parseStoreTime 解析 SQLite 存储的时间字符串（均为 UTC）：
+// 旧驱动/旧数据为 "2006-01-02 15:04:05"，新驱动 CURRENT_TIMESTAMP /
+// datetime() 输出 ISO-8601（如 "2026-08-14T02:03:18Z"）。
+func parseStoreTime(s string) (time.Time, error) {
 	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
-		return t.Local().Format("2006-01-02 15:04")
+		return t, nil
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("unparseable stored time %q", s)
+}
+
+// localTime parses a stored UTC timestamp string — legacy
+// "2006-01-02 15:04:05" or ISO-8601 "2026-08-14T02:03:18Z" — and reformats
+// it in Beijing time ("2006-01-02 15:04:05"), falling back to the raw value
+// when parsing fails (e.g. legacy free-form data).
+func localTime(s string) string {
+	if t, err := parseStoreTime(s); err == nil {
+		return t.In(beijingTZ).Format("2006-01-02 15:04:05")
 	}
 	return s
 }
@@ -4958,10 +4979,6 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 			oauthFail("密码长度至少 6 位", "", username)
 			return
 		}
-		if r.FormValue("confirm_password") != password {
-			oauthFail("两次输入的密码不一致", "", username)
-			return
-		}
 		requireCode, _ := models.GetConfig("require_reg_code")
 		if requireCode == "true" && regCode == "" {
 			oauthFail("", "请输入注册码", username)
@@ -5406,7 +5423,7 @@ func adminVoidOldCodesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := models.DB.Exec(`UPDATE redeem_codes SET status='void'
-		WHERE status='active' AND created_at < datetime('now','-30 days')`)
+		WHERE status='active' AND julianday(created_at) < julianday('now','-30 days')`)
 	if err != nil {
 		http.Error(w, "操作失败，请重试", http.StatusInternalServerError)
 		return
