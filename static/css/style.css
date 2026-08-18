@@ -739,6 +739,23 @@ a.link-primary { color: var(--primary); }
 .app-pagination .page-item.disabled .page-link { color: var(--text-muted); background: #f7f8fc; }
 .app-pagination .page-item:not(.disabled) .page-link:hover { background: var(--primary); border-color: var(--primary); color: #fff; }
 
+/* 每页条数切换 */
+.page-size-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.4rem;
+  padding: .2rem .6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: #fff;
+  font-size: .8rem;
+  text-decoration: none;
+}
+.page-size-link:hover { border-color: var(--primary); color: var(--primary); }
+.page-size-link.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+
 /* ---------- Toast ---------- */
 .toast-container { z-index: 3000; }
 .toast { border: none; border-radius: 12px; box-shadow: var(--shadow-lg); font-size: .9rem; }

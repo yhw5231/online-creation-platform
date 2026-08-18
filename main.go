@@ -3300,7 +3300,19 @@ func adminUpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	saveEndpointsFromForm(r)
 	// 按最新存储设置重建上传器（并发安全：worker 线程可能正在读取）
 	setUploader(loadStorageUploader())
-	flashRedirect(w, r, "/admin/settings", "设置已保存")
+	// 保存后停留在当前设置分类标签（避免跳回"基本信息"）
+	// settings_pane 由页面 JS 随表单提交，非法值一律忽略
+	pane := r.FormValue("settings_pane")
+	switch pane {
+	case "basic", "register", "checkin", "endpoints", "oauth", "storage", "cleanup", "about":
+	default:
+		pane = ""
+	}
+	target := "/admin/settings"
+	if pane != "" {
+		target += "#" + pane
+	}
+	flashRedirect(w, r, target, "设置已保存")
 }
 
 // ---------- 在线检测新版本 & 在线更新 ----------
@@ -4666,31 +4678,45 @@ func adminRedeemCodesHandler(w http.ResponseWriter, r *http.Request) {
 	redeemAdminPage(w, r, nil)
 }
 
-// redeemAdminPage 渲染兑换码/注册码管理页（含分页、搜索、类型筛选），
+// redeemAdminPage 渲染兑换码/注册码管理页（含分页、搜索、类型/状态筛选），
 // extra 可追加模板数据（如批量生成后的新码，供一键复制）。
 func redeemAdminPage(w http.ResponseWriter, r *http.Request, extra map[string]interface{}) {
-	const perPage = 30
+	// 每页条数：默认 20，可选 20/50/100/200/500/1000/2000
+	const defaultPerPage = 20
+	perPage := atoiDefault(r.URL.Query().Get("size"), defaultPerPage)
+	switch perPage {
+	case 20, 50, 100, 200, 500, 1000, 2000:
+	default:
+		perPage = defaultPerPage
+	}
 	page := atoiDefault(r.URL.Query().Get("page"), 1)
 	if page < 1 {
 		page = 1
 	}
 	q := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("q")))
 	typeFilter := r.URL.Query().Get("t")
-	// 类型筛选：points = 积分兑换码（含旧版未分类码），register = 注册码
-	kindClause := ""
-	switch typeFilter {
-	case "points":
-		kindClause = " AND (rc.kind='' OR rc.kind='points')"
-	case "register":
-		kindClause = " AND rc.kind='register'"
-	}
-	clause := ""
+	statusFilter := r.URL.Query().Get("s")
+	conds := []string{}
 	args := []interface{}{}
 	if q != "" {
-		clause = " WHERE rc.code LIKE ? ESCAPE '\\'" + kindClause
+		conds = append(conds, "rc.code LIKE ? ESCAPE '\\'")
 		args = append(args, "%"+likeEscape(q)+"%")
-	} else if kindClause != "" {
-		clause = " WHERE 1=1" + kindClause
+	}
+	// 类型筛选：points = 积分兑换码（含旧版未分类码），register = 注册码
+	switch typeFilter {
+	case "points":
+		conds = append(conds, "(rc.kind='' OR rc.kind='points')")
+	case "register":
+		conds = append(conds, "rc.kind='register'")
+	}
+	// 状态筛选：active = 可用，used = 已使用，void = 已作废
+	switch statusFilter {
+	case "active", "used", "void":
+		conds = append(conds, "rc.status='"+statusFilter+"'")
+	}
+	clause := ""
+	if len(conds) > 0 {
+		clause = " WHERE " + strings.Join(conds, " AND ")
 	}
 	var total int
 	models.DB.QueryRow("SELECT COUNT(*) FROM redeem_codes rc"+clause, args...).Scan(&total)
@@ -4750,27 +4776,36 @@ func redeemAdminPage(w http.ResponseWriter, r *http.Request, extra map[string]in
 			"Remark":     remark,
 		})
 	}
-	pageBase := "/admin/redeem-codes?"
+	// 筛选回链基础地址（不含 page/size，供分页与每页条数链接复用）
+	filtersBase := "/admin/redeem-codes?"
 	if typeFilter != "" {
-		pageBase += "t=" + url.QueryEscape(typeFilter) + "&"
+		filtersBase += "t=" + url.QueryEscape(typeFilter) + "&"
+	}
+	if statusFilter != "" {
+		filtersBase += "s=" + url.QueryEscape(statusFilter) + "&"
 	}
 	if q != "" {
-		pageBase += "q=" + url.QueryEscape(q) + "&"
+		filtersBase += "q=" + url.QueryEscape(q) + "&"
 	}
+	pageBase := filtersBase + "size=" + strconv.Itoa(perPage) + "&"
 	data := map[string]interface{}{
-		"Title":      "兑换码管理",
-		"Codes":      codes,
-		"Query":      q,
-		"TypeFilter": typeFilter,
-		"Page":       page,
-		"TotalPages": totalPages,
-		"Total":      total,
-		"HasPrev":    page > 1,
-		"HasNext":    page < totalPages,
-		"PrevPage":   page - 1,
-		"NextPage":   page + 1,
-		"PageBase":   pageBase,
-		"Content":    "content-redeem-admin",
+		"Title":        "兑换码管理",
+		"Codes":        codes,
+		"Query":        q,
+		"TypeFilter":   typeFilter,
+		"StatusFilter": statusFilter,
+		"Page":         page,
+		"TotalPages":   totalPages,
+		"Total":        total,
+		"HasPrev":      page > 1,
+		"HasNext":      page < totalPages,
+		"PrevPage":     page - 1,
+		"NextPage":     page + 1,
+		"PageBase":     pageBase,
+		"SizeBase":     filtersBase,
+		"PageSize":     perPage,
+		"SizeOptions":  []int{20, 50, 100, 200, 500, 1000, 2000},
+		"Content":      "content-redeem-admin",
 	}
 	for k, v := range extra {
 		data[k] = v

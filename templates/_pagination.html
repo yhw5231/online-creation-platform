@@ -23,11 +23,23 @@
     <span>共 {{.Total}} 条记录</span>
     <span class="text-secondary">·</span>
     <form method="GET" action="{{.PageBase}}" class="d-flex align-items-center gap-1" data-pagejump>
+        {{if .Query}}<input type="hidden" name="q" value="{{.Query}}">{{end}}
+        {{if .TypeFilter}}<input type="hidden" name="t" value="{{.TypeFilter}}">{{end}}
+        {{if .StatusFilter}}<input type="hidden" name="s" value="{{.StatusFilter}}">{{end}}
+        {{if .PageSize}}<input type="hidden" name="size" value="{{.PageSize}}">{{end}}
         <label class="form-label mb-0 me-1" for="pj">跳至</label>
         <input type="number" id="pj" name="page" min="1" max="{{.TotalPages}}" class="form-control form-control-sm" style="width:64px" value="{{.Page}}">
         <span>/ {{.TotalPages}} 页</span>
         <button type="submit" class="btn btn-sm btn-outline-primary flex-shrink-0">go</button>
     </form>
+</div>
+{{end}}
+{{if .SizeOptions}}
+<div class="d-flex align-items-center justify-content-center gap-2 text-muted small pb-3 flex-wrap">
+    <span>每页显示</span>
+    {{range .SizeOptions}}
+    <a href="{{$.SizeBase}}size={{.}}" class="page-size-link {{if eq $.PageSize .}}active{{end}}">{{.}}</a>
+    {{end}}
 </div>
 {{end}}
 {{end}}
