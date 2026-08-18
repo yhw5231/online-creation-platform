@@ -6,11 +6,13 @@
                 <h5 class="mb-0 fw-bold">积分兑换</h5>
             </div>
             <div class="card-body p-4">
+                <div id="redeemMsg">
                 {{if and .Message (eq .MessageType "success")}}
                 <div class="alert alert-success dismissible-auto" role="alert">{{.Message}}</div>
                 {{end}}
+                </div>
                 <p class="text-muted small mb-4">输入兑换码，即可将对应积分充入你的账户。</p>
-                <form method="POST" action="/redeem" data-submit="loading" novalidate>
+                <form method="POST" action="/redeem" data-submit="loading" data-async novalidate>
                     <input type="hidden" name="_csrf" value="{{.CSRF}}">
                     <div class="mb-4">
                         <label class="form-label fw-semibold">兑换码</label>
@@ -23,12 +25,12 @@
                 </form>
                 <div class="d-flex justify-content-between align-items-center mt-4 pt-3 border-top small text-muted">
                     <span>当前积分</span>
-                    <span class="points-text fs-6">{{comma .Points}}</span>
+                    <span class="points-text fs-6" id="redeemPoints">{{comma .Points}}</span>
                 </div>
                 {{if .History}}
                 <hr>
                 <h6 class="fw-bold mb-3">最近兑换记录</h6>
-                <ul class="list-unstyled mb-0 small">
+                <ul class="list-unstyled mb-0 small" id="redeemHistory">
                     {{range .History}}
                     <li class="d-flex justify-content-between align-items-center gap-2 py-2 border-bottom">
                         <span class="font-monospace fw-semibold me-2">{{.Code}}</span>

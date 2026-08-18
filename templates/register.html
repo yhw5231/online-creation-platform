@@ -13,10 +13,10 @@
         </ul>
     </div>
     <div class="auth-split-form">
-        {{if .Error}}<div class="alert alert-danger dismissible-auto" role="alert">{{.Error}}</div>{{end}}
+        <div id="asyncFormAlert">{{if .Error}}<div class="alert alert-danger dismissible-auto" role="alert">{{.Error}}</div>{{end}}</div>
         <h5 class="fw-bold mb-1">注册新账号</h5>
         <p class="text-muted small mb-4">只需用户名和密码即可开始</p>
-        <form method="POST" action="/register" data-submit="loading" novalidate>
+        <form method="POST" action="/register" data-submit="loading" data-async novalidate>
             <input type="hidden" name="_csrf" value="{{.CSRF}}">
             {{if .Next}}<input type="hidden" name="next" value="{{.Next}}">{{end}}
             <div class="mb-3">

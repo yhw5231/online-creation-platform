@@ -66,6 +66,170 @@
     });
   });
 
+  /* ---------- 异步表单：注册 / 兑换 / Linux.do 完善账号 ----------
+     出错时原地显示错误信息（不刷新页面、不丢失已输入内容），
+     成功后按后端返回的 redirect 跳转（兑换成功原地更新积分与记录）。 */
+  (function () {
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+    function commaJs(n) {
+      var v = Number(n || 0);
+      if (!isFinite(v)) v = 0;
+      return v.toLocaleString('en-US');
+    }
+    // 在输入框下方显示/更新字段级错误（id 与后端渲染的错误节点一致）
+    function setFieldError(input, id, msg) {
+      var wrap = input ? (input.closest('.mb-3, .mb-4') || input.parentElement) : null;
+      var prev = wrap ? wrap.querySelector('#' + id) : null;
+      if (prev) prev.remove();
+      if (!msg) {
+        if (input) input.classList.remove('is-invalid');
+        return;
+      }
+      if (input) {
+        input.classList.add('is-invalid');
+        input.setAttribute('aria-describedby', id);
+      }
+      if (!wrap) return;
+      var div = document.createElement('div');
+      div.className = 'text-danger small mt-1';
+      div.id = id;
+      div.setAttribute('role', 'alert');
+      div.textContent = msg;
+      wrap.appendChild(div);
+    }
+    // 表单顶部提示条（用户名/密码等整体错误）
+    function setFormAlert(msg) {
+      var box = document.getElementById('asyncFormAlert');
+      if (!box) return;
+      box.innerHTML = msg
+        ? '<div class="alert alert-danger" role="alert">' + esc(msg) + '</div>'
+        : '';
+    }
+    // 兑换页成功：原地刷新积分、成功提示与最近记录，不刷新页面
+    function redeemSuccess(form, d) {
+      var msgBox = document.getElementById('redeemMsg');
+      if (msgBox) {
+        msgBox.innerHTML = '<div class="alert alert-success" role="alert">' + esc(d.msg || '兑换成功') + '</div>';
+      }
+      var pts = document.getElementById('redeemPoints');
+      if (pts) pts.textContent = commaJs(d.points);
+      var navPts = document.querySelector('.nav-points-val');
+      if (navPts) navPts.textContent = commaJs(d.points);
+      if (d.history && d.history.length && d.history[0].Code) {
+        var list = document.getElementById('redeemHistory');
+        var row = d.history[0];
+        if (list) {
+          var li = document.createElement('li');
+          li.className = 'd-flex justify-content-between align-items-center gap-2 py-2 border-bottom';
+          li.innerHTML = '<span class="font-monospace fw-semibold me-2">' + esc(row.Code) + '</span>' +
+            '<span class="text-muted text-nowrap">' + esc(row.UsedAt || '') + '</span>' +
+            '<span class="points-text text-nowrap">+' + commaJs(row.Points) + '</span>';
+          list.insertBefore(li, list.firstChild);
+          while (list.children.length > 5) list.removeChild(list.lastChild);
+        } else {
+          // 无历史区块（首次兑换）：在积分行下方创建"最近兑换记录"
+          var ptsRow = document.getElementById('redeemPoints');
+          var host = ptsRow ? ptsRow.closest('.d-flex') : null;
+          if (host && host.parentNode) {
+            var hr = document.createElement('hr');
+            var h6 = document.createElement('h6');
+            h6.className = 'fw-bold mb-3';
+            h6.textContent = '最近兑换记录';
+            list = document.createElement('ul');
+            list.id = 'redeemHistory';
+            list.className = 'list-unstyled mb-0 small';
+            list.appendChild(li);
+            host.parentNode.insertBefore(hr, host.nextSibling);
+            host.parentNode.insertBefore(h6, host.nextSibling);
+            host.parentNode.insertBefore(list, host.nextSibling);
+          }
+        }
+      }
+      var codeInput = form.querySelector('input[name="code"]');
+      if (codeInput) {
+        codeInput.value = '';
+        codeInput.classList.remove('is-invalid');
+      }
+      // 清除上一次的错误提示
+      var prevErr = document.getElementById('codeError');
+      if (prevErr) prevErr.remove();
+    }
+    // 通用错误展示：兑换页显示在兑换码输入框下，注册类显示顶部（+注册码字段）
+    function showAsyncError(form, d, status) {
+      var isRedeem = (form.getAttribute('action') || '').indexOf('/redeem') !== -1;
+      if (isRedeem) {
+        var input = form.querySelector('input[name="code"]');
+        setFieldError(input, 'codeError', d && d.error ? d.error : (status === 429 ? '操作过于频繁，请稍后再试' : '操作失败，请重试'));
+        return;
+      }
+      setFormAlert((d && d.form) || (status === 429 ? '操作过于频繁，请稍后再试' : null));
+      setFieldError(form.querySelector('input[name="reg_code"]'), 'regCodeError', (d && d.reg_code) || null);
+      if (!(d && (d.form || d.reg_code)) && status !== 429) {
+        setFormAlert('网络异常，请稍后重试');
+      }
+    }
+
+    document.querySelectorAll('form[data-async]').forEach(function (form) {
+      var btn = form.querySelector('.btn-loading');
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        if (form.getAttribute('data-ajax-busy') === '1') return;
+        form.setAttribute('data-ajax-busy', '1');
+        var origHTML = btn ? btn.innerHTML : '';
+        if (btn) {
+          var text = btn.getAttribute('data-loading-text') || '处理中...';
+          btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>' + esc(text);
+          btn.disabled = true;
+        }
+        var action = form.getAttribute('action') || location.pathname;
+        function done() {
+          form.setAttribute('data-ajax-busy', '0');
+          if (btn) { btn.innerHTML = origHTML; btn.disabled = false; }
+        }
+        fetch(action, {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          body: new FormData(form),
+          credentials: 'same-origin'
+        }).then(function (resp) {
+          // 中间件重定向（如未登录跳登录页）：跟随跳转
+          if (resp.redirected) { location.href = resp.url; return null; }
+          return resp.json().then(function (data) {
+            return { data: data, status: resp.status };
+          }).catch(function () {
+            return { _broken: true, status: resp.status };
+          });
+        }).then(function (r) {
+          if (r === null) return;
+          done();
+          if (r._broken) {
+            showAsyncError(form, null, r.status);
+            return;
+          }
+          var d = r.data;
+          if (d.ok) {
+            if ((form.getAttribute('action') || '').indexOf('/redeem') !== -1) {
+              redeemSuccess(form, d);
+            } else if (d.redirect) {
+              location.href = d.redirect;
+            } else {
+              location.reload();
+            }
+            return;
+          }
+          showAsyncError(form, d, r.status);
+        }).catch(function () {
+          done();
+          showAsyncError(form, null, 0);
+        });
+      });
+    });
+  })();
+
   /* ---------- 导航高亮 ---------- */
   (function highlightNav() {
     var path = location.pathname;

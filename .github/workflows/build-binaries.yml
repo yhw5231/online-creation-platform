@@ -7,7 +7,10 @@ name: Build Native Binaries (Windows / macOS / Linux)
 #
 # 版本发布要求（详见 docs/release.md）：
 #   - 发布说明必须用中文并逐条写明本次变动内容，禁止只放自动生成的 "Full Changelog"；
-#   - 版本号在此处通过 -X main.AppVersion 注入可执行文件，设置页“关于与更新”据此
+#   - 每次推送到 master，CI 会自动把 VERSION 文件（仓库唯一版本来源）补丁号 +1
+#     并回写仓库；本工作流在打 v* 标签时，强校验标签版本号必须与 VERSION 文件
+#     一致（否则构建直接失败），确保"发布版本 == 文件内版本号"；
+#   - 版本号通过 -X main.AppVersion 注入可执行文件，设置页“关于与更新”据此
 #     在线检测新版本 / 在线更新；
 #   - 提交信息请使用中文，便于自动汇总生成发布说明。
 on:
@@ -44,6 +47,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check version alignment (tag must match VERSION file)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          # 强制"发布版本 == 文件内版本号"：每次推送到 master 都会自动把
+          # VERSION 补丁号 +1，因此发布即打当前 VERSION 对应的标签即可。
+          # 手动触发（workflow_dispatch）不受此约束，版本号同样取自 VERSION 文件。
+          FILE_VER="v$(cat VERSION)"
+          if [ "${GITHUB_REF_NAME}" != "${FILE_VER}" ]; then
+            echo "::error::发布标签 ${GITHUB_REF_NAME} 与仓库文件内版本号 ${FILE_VER} 不一致。请先推送到 master 让 CI 自动升级版本号，然后改打标签 ${FILE_VER} 再触发发布。"
+            exit 1
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -57,8 +72,10 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist/package
-          # 注入真实版本号（如 v1.0.1），供设置页“关于与更新”显示与在线更新比较
-          go build -trimpath -ldflags "-s -w -X main.AppVersion=${GITHUB_REF_NAME}" -o dist/package/app${{ matrix.ext }} .
+          # 版本号统一取自 VERSION 文件（标签触发时已由上方校验与标签一致），
+          # 供设置页“关于与更新”显示与在线更新比较
+          APP_VER="v$(cat VERSION)"
+          go build -trimpath -ldflags "-s -w -X main.AppVersion=${APP_VER}" -o dist/package/app${{ matrix.ext }} .
           cp -r templates static dist/package/
 
       - name: Package

@@ -10,20 +10,22 @@
    - 不好：`fix bug`、`update`、`misc changes`
 2. 每个提交只做一件事，避免把无关改动混在一个提交里，便于后续自动汇总发布说明。
 3. 推送前先本地构建并跑通测试：`go build ./... && go test ./...`。
+4. **版本号完全自动化，无需手动修改**：每次推送到 master，CI 自动把仓库根目录 `VERSION` 文件（唯一版本来源）的补丁号 +1（如 `1.0.0 → 1.0.1`），同步更新 `main.go` 内置默认版本号，并提交回仓库（`[skip ci]`）、尽力打 `vX.Y.Z` 标签，然后用该版本号构建并发布 ghcr.io 镜像（`latest` + `vX.Y.Z`）。
+   - **效果**：每次推送后服务器 `docker compose pull && docker compose up -d` 拉取的新镜像，设置页"关于与更新"中的版本号都会随之 +1，不再固定显示 `v1.0.0`。
 
-## 二、版本发布要求（打 v 标签）
+## 二、原生安装包发布要求（打 v 标签）
 
-1. 版本号格式：`vX.Y.Z`（如 `v1.0.1`）。打标签：`git tag v1.0.1 && git push origin v1.0.1`。
-2. 打标签后 GitHub Actions 自动执行（见 `.github/workflows/`）：
-   - `build-binaries.yml`：交叉编译 Windows / macOS / Linux 各平台原生安装包，并把版本号注入可执行文件（`-X main.AppVersion=vX.Y.Z`，设置页"关于与更新"读取并用于**在线检测新版本 / 在线更新**）；
-   - `docker-publish.yml`：构建并发布 ghcr.io 镜像（含 `vX.Y.Z` 与 `latest` 标签）。
+Docker 镜像在每次推送 master 时自动发布，**无需打标签**；只有需要发布 Windows / macOS / Linux 原生安装包（GitHub Release）时才打标签：
+
+1. 版本号格式：`vX.Y.Z`（如 `v1.0.1`）。**标签版本号必须与仓库文件内版本号（`VERSION` 文件内容）完全一致**，CI 会强校验，不一致直接构建失败——因为每次推送 master 已自动升级版本号，所以直接打当前 `VERSION` 对应的标签即可（例：`VERSION` 为 `1.0.3` 则打 `git tag v1.0.3 && git push origin v1.0.3`）。
+2. 打标签后 GitHub Actions 自动执行 `build-binaries.yml`：交叉编译各平台原生安装包，把版本号注入可执行文件（`-X main.AppVersion=vX.Y.Z`，设置页"关于与更新"读取并用于**在线检测新版本 / 在线更新**）。
 3. **发布说明必须详细、中文、逐条写明本次变动内容**。CI 会自动从"上一个标签 → 当前标签"之间的全部提交汇总成"更新内容"清单；发布前请在 GitHub Releases 页面手工补充/校验说明（例如：升级注意事项、配置文件变更、数据库变更、需要管理员重新设置的项目）。**禁止删除变动清单而只保留 "Full Changelog"。**
-4. 若发布后发现重大缺陷需要补丁：修复后打 `vX.Y.Z+1` 标签再发布，不要在已有 Release 上直接覆盖安装包。
+4. 若发布后发现重大缺陷需要补丁：先推送到 master 自动升级版本号（或等待下一次推送），再打与 `VERSION` 一致的新标签发布，不要在已有 Release 上直接覆盖安装包。
 
 ## 三、版本号与在线更新约定
 
-- 程序内置默认版本号 `v1.0.0`；正式发布的二进制由 CI 注入真实标签版本号。
-- **本地构建请使用 `build.sh` / `build.bat`**：脚本自动从最近一次 git 标签（`git describe --tags --abbrev=0`）推导版本号并注入二进制，避免手动 `go build` 导致系统内一直显示默认 `v1.0.0` 与发布版本不一致；未打标签时版本号为 `v0.0.0-dev`（设置页会提示为开发构建）。
+- 仓库根目录 `VERSION` 文件是**唯一版本来源**；`main.go` 内置默认版本号由 CI 每次推送时同步升级，保证源码内版本号与发布版本一致。
+- **本地构建请使用 `build.sh` / `build.bat`**：脚本优先从 `VERSION` 文件读取版本号注入二进制，无 `VERSION` 文件时回退到最近 git 标签 / 开发版本号；不要手动 `go build`，否则会显示源码内的默认版本号与发布版本不一致。
 - 设置页 → 系统设置 → 关于与更新：展示当前版本、在线检测 GitHub Releases 最新版、按当前平台（GOOS/GOARCH）匹配安装包并在线更新：
   - **原生二进制部署**（Windows / macOS / Linux 直接运行 app）：替换文件后自动重启；
   - **容器部署**：替换文件后在当前容器内原地重启（应用进程是容器 PID 1，用进程映像替换实现，容器不退出、立即生效）。**注意**：容器重建（`docker compose up -d` / 重启服务器）后会恢复镜像版本，持久升级请执行 `docker compose pull && docker compose up -d`，或配置 Watchtower 全自动升级。

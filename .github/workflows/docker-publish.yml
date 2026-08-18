@@ -1,12 +1,15 @@
 name: Build and Publish Docker Image
 
-# 每次推送到 master（或打 v* 标签、手动触发）时：
-# 自动构建镜像并发布到 GitHub 容器仓库（GHCR），
-# 服务器端即可 docker compose pull && docker compose up -d 直接升级。
+# 每次推送到 master（或手动触发）时：
+# 1) bump-version 作业自动把版本号 +1（补丁号）：同步更新仓库根目录 VERSION
+#    文件与 main.go 内置默认版本号，提交并推送回仓库（commit 带 [skip ci]，
+#    不会再次触发本工作流），并尽力打 vX.Y.Z 标签；
+# 2) build-and-push 作业用升级后的版本号构建镜像并发布到 GHCR（latest +
+#    vX.Y.Z 标签），服务器 docker compose pull && docker compose up -d 即可
+#    升级，且设置页"关于与更新"显示的版本号与文件内版本号保持一致。
 on:
   push:
     branches: [master]
-    tags: ["v*"]
   workflow_dispatch:
 
 env:
@@ -14,7 +17,66 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.calc.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Calculate next version
+        id: calc
+        run: |
+          CUR=$(cat VERSION)                      # 如 1.0.0
+          MAJOR=${CUR%%.*}                        # 1
+          REST=${CUR#*.}                          # 0.0
+          MINOR=${REST%%.*}                       # 0
+          PATCH=${REST#*.}                        # 0
+          NEW="$MAJOR.$MINOR.$((PATCH + 1))"      # 1.0.1
+          echo "version=v${NEW}" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version, commit and push
+        env:
+          NEW_VER: ${{ steps.calc.outputs.version }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 并发推送可能非快进：rebase 后重试，最多 3 次
+          for i in 1 2 3; do
+            git pull --rebase origin master 2>/dev/null || true
+            sed -i "s/AppVersion = \"v[0-9.]*\"/AppVersion = \"${NEW_VER}\"/" main.go
+            echo "${NEW_VER#v}" > VERSION
+            git add main.go VERSION
+            if ! git diff --cached --quiet; then
+              git commit -m "[skip ci] 自动升级版本号至 ${NEW_VER}"
+            fi
+            if git push origin master 2>/dev/null; then
+              exit 0
+            fi
+          done
+          # 重试耗尽：远端可能已包含同一版本号（并发运行已升级），最后核对一次
+          git pull --rebase origin master
+          if [ "$(cat VERSION)" != "${NEW_VER#v}" ]; then
+            echo "::error::版本号自动升级推送失败：请确认 master 分支允许 Actions（GITHUB_TOKEN）推送，或暂无分支保护拦截。"
+            exit 1
+          fi
+          git push origin master
+
+      - name: Create version tag (best effort)
+        env:
+          NEW_VER: ${{ steps.calc.outputs.version }}
+        run: |
+          # 标签仅作版本里程碑标记；由 GITHUB_TOKEN 推送的标签不会触发其它
+          # 工作流，原生安装包发布仍需按 docs/release.md 手动打标签触发。
+          git tag "${NEW_VER}" && git push origin "${NEW_VER}" \
+            || echo "提示：标签 ${NEW_VER} 已存在或无权推送标签，跳过（不影响镜像发布）"
+
   build-and-push:
+    needs: bump-version
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,14 +104,15 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            type=raw,value=latest
+            type=raw,value=${{ needs.bump-version.outputs.version }}
             type=sha,prefix=sha-
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
           labels: |
             org.opencontainers.image.title=Online Creation Platform
             org.opencontainers.image.description=AI 图片创作平台（积分制，支持兑换码/注册码）
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.bump-version.outputs.version }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -59,5 +122,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ needs.bump-version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

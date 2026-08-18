@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -11,7 +12,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"online-creation-platform/models"
@@ -1843,5 +1846,291 @@ func TestAPIV1Channels(t *testing.T) {
 	}
 	if resp.Channels[1].ID != 5 || resp.Channels[1].Index != 1 || !resp.Channels[1].NSFW {
 		t.Errorf("second channel = %+v", resp.Channels[1])
+	}
+}
+
+// TestReplaceExecutableSameFS 验证同文件系统内 replaceExecutable 走 rename：
+// 内容完整迁移、源文件消失。
+func TestReplaceExecutableSameFS(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	dst := filepath.Join(dir, "dst.bin")
+	data := []byte("new executable content")
+	if err := os.WriteFile(src, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceExecutable(src, dst); err != nil {
+		t.Fatalf("replaceExecutable: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Error("src should be gone after rename")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("dst content = %q, want %q", got, data)
+	}
+}
+
+// TestReplaceExecutableCrossDeviceFallback 模拟容器场景：/app/data 挂载卷与
+// /app 不同文件系统，rename 返回 EXDEV（invalid cross-device link）时必须
+// 退化为"拷贝 + 删除源文件"，而不是报"替换可执行文件失败"。
+func TestReplaceExecutableCrossDeviceFallback(t *testing.T) {
+	old := renameFile
+	renameFile = func(a, b string) error { return syscall.EXDEV }
+	defer func() { renameFile = old }()
+
+	src := filepath.Join(t.TempDir(), "main")
+	dst := filepath.Join(t.TempDir(), "main.new")
+	data := []byte("new binary payload")
+	// 故意不给执行位，验证拷贝兜底会补齐属主可执行位
+	if err := os.WriteFile(src, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceExecutable(src, dst); err != nil {
+		t.Fatalf("replaceExecutable with EXDEV should fall back to copy, got: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Error("src should be removed after copy fallback")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("dst content = %q, want %q", got, data)
+	}
+	// Windows 无 POSIX 权限语义（常规文件恒为 0666），执行位断言仅对 Unix 生效
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o500 != 0o500 {
+			t.Errorf("dst should be owner r-x, got %o", fi.Mode().Perm())
+		}
+	}
+}
+
+// TestReplaceExecutableNonEXDVError 验证非 EXDV 错误（如源文件不存在）原样
+// 透传，不会误入拷贝兜底。
+func TestReplaceExecutableNonEXDVError(t *testing.T) {
+	dir := t.TempDir()
+	err := replaceExecutable(filepath.Join(dir, "missing"), filepath.Join(dir, "dst"))
+	if err == nil {
+		t.Fatal("expected error for missing src")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("want ENOENT-ish error, got %v", err)
+	}
+}
+
+// TestAJAXNoPageRefresh 验证注册 / 兑换 / Linux.do 完善账号表单的异步提交：
+// 携带 X-Requested-With: XMLHttpRequest 时，后端返回 JSON 错误（不渲染整页），
+// 前端可原地显示错误而无需刷新页面；成功时返回 redirect 或积分/记录数据。
+func TestAJAXNoPageRefresh(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "ajax.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	models.SetConfig("open_registration", "true")
+	models.SetConfig("enable_password_registration", "true")
+	models.SetConfig("require_reg_code", "true")
+	models.SetConfig("enable_thirdparty_registration", "true")
+
+	// ---- 1) /register 异步提交：CSRF 缺失 → 400 JSON ----
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(url.Values{
+		"username": {"nocsrf"}, "password": {"123456"}, "confirm_password": {"123456"}, "reg_code": {"X"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("X-Requested-With", "XMLHttpRequest")
+	registerHandler(ww, rr)
+	if ww.Code != http.StatusBadRequest {
+		t.Fatalf("missing csrf status = %d, body=%s", ww.Code, ww.Body.String())
+	}
+	var csrfErr struct {
+		OK   bool   `json:"ok"`
+		Form string `json:"form"`
+	}
+	if err := json.Unmarshal(ww.Body.Bytes(), &csrfErr); err != nil {
+		t.Fatalf("expect JSON response: %v", err)
+	}
+	if csrfErr.OK || csrfErr.Form == "" {
+		t.Errorf("missing csrf should return JSON error, got %+v", csrfErr)
+	}
+
+	// ---- 2) /register 异步提交：无效注册码 → JSON 字段错误，不创建用户 ----
+	w := httptest.NewRecorder()
+	r0 := httptest.NewRequest(http.MethodGet, "/register", nil)
+	csrf := csrfToken(w, r0)
+	cookie := w.Header().Get("Set-Cookie")
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(url.Values{
+		"_csrf":            {csrf},
+		"username":         {"ajaxuser"},
+		"password":         {"123456"},
+		"confirm_password": {"123456"},
+		"reg_code":         {"NOTEXIST1"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", cookie)
+	rr.Header.Set("X-Requested-With", "XMLHttpRequest")
+	registerHandler(ww, rr)
+	if ww.Code != http.StatusOK {
+		t.Fatalf("register ajax error status = %d", ww.Code)
+	}
+	if ct := ww.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("want JSON content type, got %q", ct)
+	}
+	var regErr struct {
+		OK      bool   `json:"ok"`
+		RegCode string `json:"reg_code"`
+	}
+	if err := json.Unmarshal(ww.Body.Bytes(), &regErr); err != nil {
+		t.Fatalf("register ajax body not JSON: %v (%s)", err, truncateRunes(ww.Body.String(), 200))
+	}
+	if regErr.OK || regErr.RegCode != "注册码无效或已被使用" {
+		t.Errorf("register bad code error = %+v", regErr)
+	}
+	var cnt int
+	models.DB.QueryRow("SELECT COUNT(*) FROM users WHERE username='ajaxuser'").Scan(&cnt)
+	if cnt != 0 {
+		t.Errorf("failed register must roll back the user, found %d", cnt)
+	}
+
+	// ---- 3) /register 异步提交：有效注册码 → JSON 成功 + redirect ----
+	models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status) VALUES('OKREG1', 0, 'register', 0, 'active')")
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(url.Values{
+		"_csrf":            {csrf},
+		"username":         {"ajaxokuser"},
+		"password":         {"123456"},
+		"confirm_password": {"123456"},
+		"reg_code":         {"OKREG1"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", cookie)
+	rr.Header.Set("X-Requested-With", "XMLHttpRequest")
+	registerHandler(ww, rr)
+	var regOK struct {
+		OK       bool   `json:"ok"`
+		Redirect string `json:"redirect"`
+	}
+	if err := json.Unmarshal(ww.Body.Bytes(), &regOK); err != nil {
+		t.Fatalf("register success not JSON: %v (%s)", err, ww.Body.String())
+	}
+	if !regOK.OK || regOK.Redirect != "/login" {
+		t.Errorf("register ajax success = %+v", regOK)
+	}
+	models.DB.QueryRow("SELECT COUNT(*) FROM redeem_codes WHERE code='OKREG1' AND status='used'").Scan(&cnt)
+	if cnt != 1 {
+		t.Errorf("register code should be consumed, used=%d", cnt)
+	}
+
+	// ---- 4) /redeem 异步提交：无效兑换码 → JSON 错误；有效 → JSON 成功+积分 ----
+	res, _ := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)", "ajaxredeemer", "x", 100, "user", 1)
+	uid, _ := res.LastInsertId()
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest(http.MethodGet, "/redeem", nil)
+	s2, _ := store.New(r2, "session")
+	s2.Values["userID"] = uid
+	s2.Values["username"] = "ajaxredeemer"
+	s2.Values["role"] = "user"
+	s2.Save(r2, w2)
+	sessCookie2 := lastCookie(w2)
+	// CSRF token 必须存进上面这个会话：带会话 cookie 的请求再取 token
+	r2b := httptest.NewRequest(http.MethodGet, "/redeem", nil)
+	r2b.Header.Set("Cookie", sessCookie2)
+	csrf2 := csrfToken(w2, r2b)
+	cookie2 := lastCookie(w2)
+
+	redeemPost := func(code string) []byte {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, "/redeem", strings.NewReader(url.Values{
+			"_csrf": {csrf2}, "code": {code},
+		}.Encode()))
+		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr.Header.Set("Cookie", cookie2)
+		rr.Header.Set("X-Requested-With", "XMLHttpRequest")
+		redeemHandler(ww, rr)
+		return ww.Body.Bytes()
+	}
+
+	// 无效码：JSON 错误
+	var badRedeem struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(redeemPost("BADCODE1"), &badRedeem); err != nil {
+		t.Fatalf("redeem bad code not JSON: %v", err)
+	}
+	if badRedeem.OK || !strings.Contains(badRedeem.Error, "无效或已被使用") {
+		t.Errorf("redeem bad code error = %+v", badRedeem)
+	}
+
+	// 有效码：JSON 成功，返回最新积分与兑换记录
+	models.DB.Exec("INSERT INTO redeem_codes(code, points, kind, created_by, status) VALUES('PTSAJX1', 50, 'points', 0, 'active')")
+	body := redeemPost("PTSAJX1")
+	var goodRedeem struct {
+		OK      bool   `json:"ok"`
+		Msg     string `json:"msg"`
+		Points  int64  `json:"points"`
+		History []struct {
+			Code   string `json:"Code"`
+			Points int64  `json:"Points"`
+		} `json:"history"`
+	}
+	if err := json.Unmarshal(body, &goodRedeem); err != nil {
+		t.Fatalf("redeem success not JSON: %v (%s)", err, body)
+	}
+	if !goodRedeem.OK || !strings.Contains(goodRedeem.Msg, "获得 50 积分") || goodRedeem.Points != 150 {
+		t.Errorf("redeem success = %+v", goodRedeem)
+	}
+	if len(goodRedeem.History) == 0 || goodRedeem.History[0].Code != "PTSAJX1" {
+		t.Errorf("redeem history should include the new record, got %+v", goodRedeem.History)
+	}
+	models.DB.QueryRow("SELECT points FROM users WHERE id=?", uid).Scan(&goodRedeem.Points)
+	if goodRedeem.Points != 150 {
+		t.Errorf("db points = %d, want 150", goodRedeem.Points)
+	}
+
+	// ---- 5) Linux.do 完善账号页异步提交：无效注册码 → JSON 字段错误 ----
+	w3 := httptest.NewRecorder()
+	r3 := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/setup", nil)
+	s3, _ := store.New(r3, "session")
+	s3.Values["oauth_pending_user_id"] = int64(99992)
+	s3.Values["oauth_pending_username"] = "linuxajax"
+	s3.Values["oauth_pending_next"] = "/create"
+	s3.Save(r3, w3)
+	oauthCookie := lastCookie(w3)
+	// CSRF token 必须存进上面这个会话：带会话 cookie 的请求再取 token
+	r3b := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/setup", nil)
+	r3b.Header.Set("Cookie", oauthCookie)
+	csrf3 := csrfToken(w3, r3b)
+	cookie3 := lastCookie(w3)
+	ww = httptest.NewRecorder()
+	rr = httptest.NewRequest(http.MethodPost, "/auth/linuxdo/setup", strings.NewReader(url.Values{
+		"_csrf":            {csrf3},
+		"username":         {"linuxajax"},
+		"password":         {"123456"},
+		"confirm_password": {"123456"},
+		"reg_code":         {"BADOAUTH"},
+	}.Encode()))
+	rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr.Header.Set("Cookie", cookie3)
+	rr.Header.Set("X-Requested-With", "XMLHttpRequest")
+	linuxdoSetupHandler(ww, rr)
+	var oauthErr struct {
+		OK      bool   `json:"ok"`
+		RegCode string `json:"reg_code"`
+	}
+	if err := json.Unmarshal(ww.Body.Bytes(), &oauthErr); err != nil {
+		t.Fatalf("oauth setup not JSON: %v (%s)", err, truncateRunes(ww.Body.String(), 200))
+	}
+	if oauthErr.OK || oauthErr.RegCode != "注册码无效或已被使用" {
+		t.Errorf("oauth setup bad code error = %+v", oauthErr)
 	}
 }

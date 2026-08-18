@@ -43,11 +43,13 @@ var (
 	store = sessions.NewCookieStore(sessionKey())
 	tpl   *template.Template
 
-	// AppVersion 是当前程序版本号（vX.Y.Z）。打 v* 标签发布时由 CI
-	// 通过 -ldflags "-X main.AppVersion=..." 注入真实版本；本地构建
-	// 使用默认值 v1.0.0。设置页"关于与更新"中展示，并与 GitHub
-	// Releases 最新版比较实现在线检测/在线更新。
-	AppVersion = "v1.0.0"
+	// AppVersion 是当前程序版本号（vX.Y.Z）。仓库根目录 VERSION 文件是唯一
+	// 版本来源：每次推送到 master 时 CI（.github/workflows/docker-publish.yml）
+	// 自动把 VERSION 与这里的内置默认值同步 +1（补丁号）并回写仓库；发布
+	// （ghcr 镜像 / 原生安装包）时通过 -ldflags "-X main.AppVersion=..." 注入
+	// 同一版本号，保证"文件内版本号"与发布版本、镜像内版本号始终一致。
+	// 本地构建请使用 build.sh / build.bat（优先读取 VERSION 文件）。
+	AppVersion = "v1.3.0"
 	// uploader 按后台"存储设置"构造的外部长期存储上传器（s3/webdav/post）；
 	// 未配置时为 nil，图片只存服务器本地。
 	// 注意：设置保存/重置（HTTP 请求线程）与生成 worker（后台线程）会并发
@@ -170,6 +172,30 @@ func verifyCSRF(r *http.Request) bool {
 	session, _ := store.Get(r, "session")
 	tok, _ := session.Values["csrf"].(string)
 	return tok != "" && secureCompare(tok, r.FormValue("_csrf"))
+}
+
+// ajaxRequest 判断请求是否由前端异步（fetch）提交：异步请求出错时后端返回
+// JSON，由前端原地展示错误，不再整页刷新/重渲染。
+func ajaxRequest(r *http.Request) bool {
+	return r.Header.Get("X-Requested-With") == "XMLHttpRequest"
+}
+
+// writeJSON 输出 JSON 响应（异步表单接口统一出口）。
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+// formFail 是注册类表单（普通注册 / Linux.do 完善账号）校验失败的统一出口：
+// 异步请求返回 JSON（http 200，字段级错误由前端原地显示、不刷新页面）；
+// 普通请求保持原有整页重渲染行为（render 回调）。
+func formFail(w http.ResponseWriter, r *http.Request, render func(http.ResponseWriter, *http.Request, string, string, string, string), formErr, codeErr, next, username string) {
+	if ajaxRequest(r) {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": false, "form": formErr, "reg_code": codeErr})
+		return
+	}
+	render(w, r, formErr, codeErr, next, username)
 }
 
 // consumeToken verifies a per-action token against the session and consumes
@@ -328,10 +354,15 @@ func allowRateLimit(key string, limit int, window time.Duration) bool {
 }
 
 // rateLimited 包裹敏感接口：POST 请求按 IP 限流，超限返回 429。
+// 异步请求返回 JSON，前端原地提示，不刷新页面。
 func rateLimited(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && !allowRateLimit(clientIP(r), rateLimitPerIP, rateLimitWindow) {
 			log.Printf("rate limited: ip=%s path=%s", clientIP(r), r.URL.Path)
+			if ajaxRequest(r) {
+				writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{"ok": false, "error": "操作过于频繁，请稍后再试"})
+				return
+			}
 			http.Error(w, "操作过于频繁，请稍后再试", http.StatusTooManyRequests)
 			return
 		}
@@ -1085,7 +1116,13 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
+		// 异步提交：前端 fetch 拦截提交，出错由 JSON 原地展示，不刷新页面；
+		// 普通提交（无 JS 环境/外部调用）保持原有整页渲染。
 		if !verifyCSRF(r) {
+			if ajaxRequest(r) {
+				writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "form": "表单已过期，请刷新页面后重试"})
+				return
+			}
 			renderError(w, r, "400", "表单已过期，请刷新页面后重试")
 			return
 		}
@@ -1096,20 +1133,20 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		password := r.FormValue("password")
 		regCode := strings.ToUpper(strings.TrimSpace(r.FormValue("reg_code")))
 		if len(username) < 2 || len(username) > 32 {
-			renderRegister(w, r, "用户名长度需在 2-32 个字符之间", "", next, username)
+			formFail(w, r, renderRegister, "用户名长度需在 2-32 个字符之间", "", next, username)
 			return
 		}
 		if len(password) < 6 {
-			renderRegister(w, r, "密码长度至少 6 位", "", next, username)
+			formFail(w, r, renderRegister, "密码长度至少 6 位", "", next, username)
 			return
 		}
 		if r.FormValue("confirm_password") != password {
-			renderRegister(w, r, "两次输入的密码不一致", "", next, username)
+			formFail(w, r, renderRegister, "两次输入的密码不一致", "", next, username)
 			return
 		}
 		requireCode, _ := models.GetConfig("require_reg_code")
 		if requireCode == "true" && regCode == "" {
-			renderRegister(w, r, "", "请输入注册码", next, username)
+			formFail(w, r, renderRegister, "", "请输入注册码", next, username)
 			return
 		}
 		hashed, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -1120,6 +1157,10 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 			// 并靠 RowsAffected 校验唯一占用，杜绝同一码并发注册多个账号
 			tx, err := models.DB.Begin()
 			if err != nil {
+				if ajaxRequest(r) {
+					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "form": "系统繁忙，请重试"})
+					return
+				}
 				http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
 				return
 			}
@@ -1127,23 +1168,31 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 				username, string(hashed), initialPoints, "user", 1)
 			if err != nil {
 				tx.Rollback()
-				renderRegister(w, r, "用户名已存在或输入有误", "", next, username)
+				formFail(w, r, renderRegister, "用户名已存在或输入有误", "", next, username)
 				return
 			}
 			uid, _ := res.LastInsertId()
 			res2, err := tx.Exec("UPDATE redeem_codes SET status='used', used_by=?, used_at=CURRENT_TIMESTAMP WHERE code=? AND status='active' AND (kind='' OR kind='register')", uid, regCode)
 			if err != nil {
 				tx.Rollback()
+				if ajaxRequest(r) {
+					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "form": "系统繁忙，请重试"})
+					return
+				}
 				http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
 				return
 			}
 			if n, _ := res2.RowsAffected(); n == 0 {
 				// 注册码已被他人占用：回滚账号创建，不产生垃圾用户
 				tx.Rollback()
-				renderRegister(w, r, "", "注册码无效或已被使用", next, username)
+				formFail(w, r, renderRegister, "", "注册码无效或已被使用", next, username)
 				return
 			}
 			if err := tx.Commit(); err != nil {
+				if ajaxRequest(r) {
+					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "form": "系统繁忙，请重试"})
+					return
+				}
 				http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
 				return
 			}
@@ -1156,14 +1205,14 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 			} else {
 				next = "/login?next=" + url.QueryEscape(next)
 			}
-			flashRedirect(w, r, next, "注册成功，请登录")
+			registerAJAXSuccess(w, r, next)
 			return
 		}
 
 		_, err := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)",
 			username, string(hashed), initialPoints, "user", 1)
 		if err != nil {
-			renderRegister(w, r, "用户名已存在或输入有误", "", next, username)
+			formFail(w, r, renderRegister, "用户名已存在或输入有误", "", next, username)
 			return
 		}
 		var uid int64
@@ -1177,10 +1226,21 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			next = "/login?next=" + url.QueryEscape(next)
 		}
-		flashRedirect(w, r, next, "注册成功，请登录")
+		registerAJAXSuccess(w, r, next)
 		return
 	}
 	renderRegister(w, r, "", "", next, "")
+}
+
+// registerAJAXSuccess 是注册成功后的统一出口：异步请求返回 JSON（前端跳转
+// redirect，flash 消息随会话 cookie 生效），普通请求维持原有 flash 重定向。
+func registerAJAXSuccess(w http.ResponseWriter, r *http.Request, next string) {
+	if ajaxRequest(r) {
+		setFlash(w, r, "注册成功，请登录")
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "redirect": next})
+		return
+	}
+	flashRedirect(w, r, next, "注册成功，请登录")
 }
 
 // renderRegister 渲染注册页：errMsg（用户名/密码等）显示在表单顶部，
@@ -2662,53 +2722,83 @@ func redeemHistory(userID int64) []map[string]interface{} {
 func redeemHandler(w http.ResponseWriter, r *http.Request) {
 	userID, username, _ := currentUser(r)
 	if r.Method == http.MethodPost {
+		// 异步请求返回 JSON（前端原地显示错误、不刷新页面），普通请求整页渲染。
 		if !verifyCSRF(r) {
+			if ajaxRequest(r) {
+				writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "表单已过期，请刷新页面后重试"})
+				return
+			}
 			renderError(w, r, "400", "表单已过期，请刷新页面后重试")
 			return
 		}
 		code := strings.ToUpper(strings.TrimSpace(r.FormValue("code")))
+		fail := func(msg string) {
+			if ajaxRequest(r) {
+				writeJSON(w, http.StatusOK, map[string]interface{}{"ok": false, "error": msg})
+				return
+			}
+			renderRedeem(w, r, msg, "error", code)
+		}
 		if code == "" || len(code) > 32 {
 			msg := "兑换码无效或已被使用"
 			if code == "" {
 				msg = "请输入兑换码"
 			}
-			renderRedeem(w, r, msg, "error", code)
+			fail(msg)
 			return
 		}
 		var points int64
 		err := models.DB.QueryRow("SELECT points FROM redeem_codes WHERE code=? AND status='active' AND (kind='' OR kind='points')", code).Scan(&points)
 		if err != nil {
-			renderRedeem(w, r, "兑换码无效或已被使用", "error", code)
+			fail("兑换码无效或已被使用")
 			return
+		}
+		fail500 := func() {
+			if ajaxRequest(r) {
+				writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "兑换失败，请稍后重试"})
+				return
+			}
+			http.Error(w, "兑换失败，请稍后重试", http.StatusInternalServerError)
 		}
 		tx, err := models.DB.Begin()
 		if err != nil {
-			http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
+			fail500()
 			return
 		}
 		if _, e1 := tx.Exec("UPDATE users SET points = points + ? WHERE id=?", points, userID); e1 != nil {
 			tx.Rollback()
-			http.Error(w, "兑换失败，请稍后重试", http.StatusInternalServerError)
+			fail500()
 			return
 		}
 		res2, e2 := tx.Exec("UPDATE redeem_codes SET status='used', used_by=?, used_at=CURRENT_TIMESTAMP WHERE code=?", userID, code)
 		if e2 != nil {
 			tx.Rollback()
-			http.Error(w, "兑换失败，请稍后重试", http.StatusInternalServerError)
+			fail500()
 			return
 		}
 		if n, _ := res2.RowsAffected(); n == 0 {
 			// 并发下已被其他请求兑换：整体回滚，绝不重复发放积分
 			tx.Rollback()
-			renderRedeem(w, r, "兑换码已被使用", "error", code)
+			fail("兑换码已被使用")
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			http.Error(w, "兑换失败，请稍后重试", http.StatusInternalServerError)
+			fail500()
 			return
 		}
 		logPoints(userID, points, "兑换码兑换获得")
 		systemLog(r, userID, username, "redeem", fmt.Sprintf("兑换 %d 积分", points), points)
+		if ajaxRequest(r) {
+			var now int64
+			models.DB.QueryRow("SELECT points FROM users WHERE id=?", userID).Scan(&now)
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"ok":      true,
+				"msg":     fmt.Sprintf("兑换成功，获得 %d 积分", points),
+				"points":  now,
+				"history": redeemHistory(userID),
+			})
+			return
+		}
 		renderRedeem(w, r, fmt.Sprintf("兑换成功，获得 %d 积分", points), "success", "")
 		return
 	}
@@ -3819,9 +3909,12 @@ func applyExecUpdate(w http.ResponseWriter, appDir, exePath, newExe, updDir, new
 		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": msg})
 	}
 	// 1) 原子替换二进制：先改名到同目录临时名，再覆盖目标
-	// （Linux 上 rename 覆盖正在运行的二进制文件是合法的）
+	// （Linux 上 rename 覆盖正在运行的二进制文件是合法的）。
+	// 容器中 /app/data 是挂载卷、与 /app 不在同一文件系统，此时 rename
+	// 会报 EXDEV（invalid cross-device link），replaceExecutable 会退化为
+	// "拷贝到目标目录 + 删除源文件"，保证后续同目录 rename 仍原子完成。
 	tmpBin := exePath + ".new"
-	if err := os.Rename(newExe, tmpBin); err != nil {
+	if err := replaceExecutable(newExe, tmpBin); err != nil {
 		fail("替换可执行文件失败：" + err.Error())
 		return
 	}
@@ -3857,6 +3950,67 @@ func applyExecUpdate(w http.ResponseWriter, appDir, exePath, newExe, updDir, new
 			log.Printf("update: exec new binary failed (files already replaced, restart manually): %v", err)
 		}
 	}()
+}
+
+// copyFileReplace 把 src 完整拷贝到 dst（保留权限并确保属主可读可执行，
+// 防止 umask 剥掉执行位），成功后删除 src。用于跨文件系统替换文件的
+// EXDEV 兜底路径。
+func copyFileReplace(src, dst string) error {
+	fi, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	mode := fi.Mode().Perm() | 0o500
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		in.Close()
+		return err
+	}
+	if _, err := io.Copy(out, in); err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		in.Close()
+		os.Remove(dst)
+		return err
+	}
+	if err := os.Chmod(dst, mode); err != nil {
+		in.Close()
+		os.Remove(dst)
+		return err
+	}
+	// 先关源文件再删除：Windows 上删除被打开的文件会失败（"正在被另一个进程
+	// 使用"），Linux 虽允许删除打开中的文件，统一先关闭更稳妥。
+	if err := in.Close(); err != nil {
+		os.Remove(dst)
+		return err
+	}
+	return os.Remove(src)
+}
+
+// renameFile 是 os.Rename 的可替换引用：单测中注入 EXDEV 错误，即可验证
+// 跨文件系统时的拷贝兜底逻辑，无需真实挂载两个文件系统。
+var renameFile = os.Rename
+
+// replaceExecutable 把 src 移动到 dst：优先原子 rename；当 src 与 dst 不在
+// 同一文件系统时（容器中 /app/data 是挂载卷、与 /app 镜像层不同设备，最
+// 为常见），Linux 的 rename 返回 EXDEV（invalid cross-device link），此时
+// 退化为"拷贝内容到 dst + 删除源文件"。调用方应保证 dst 与最终目标在同一
+// 文件系统内，使最终覆盖仍然原子。
+func replaceExecutable(src, dst string) error {
+	if err := renameFile(src, dst); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	return copyFileReplace(src, dst)
 }
 
 // copyDirReplace 递归把 src 目录拷贝到 dst，覆盖同名文件、补齐新文件。
@@ -4774,32 +4928,43 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost {
-		if !verifyCSRF(r) {
-			renderError(w, r, "400", "表单已过期，请刷新页面后重试")
-			return
-		}
 		next := ""
 		if n, _ := session.Values["oauth_pending_next"].(string); isSafeLocalPath(n) {
 			next = n
+		}
+		// 异步请求返回 JSON（前端原地显示错误、不刷新页面），普通请求整页渲染。
+		// renderOAuthSetup 不需要 next 参数，这里用闭包对齐 formFail 签名。
+		oauthFail := func(formErr, codeErr, username string) {
+			formFail(w, r, func(w http.ResponseWriter, r *http.Request, formErr, codeErr, next, username string) {
+				renderOAuthSetup(w, r, formErr, codeErr, username)
+			}, formErr, codeErr, next, username)
+		}
+		if !verifyCSRF(r) {
+			if ajaxRequest(r) {
+				writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "form": "表单已过期，请刷新页面后重试"})
+				return
+			}
+			renderError(w, r, "400", "表单已过期，请刷新页面后重试")
+			return
 		}
 		username := strings.TrimSpace(r.FormValue("username"))
 		password := r.FormValue("password")
 		regCode := strings.ToUpper(strings.TrimSpace(r.FormValue("reg_code")))
 		if len(username) < 2 || len(username) > 32 {
-			renderOAuthSetup(w, r, "用户名长度需在 2-32 个字符之间", "", username)
+			oauthFail("用户名长度需在 2-32 个字符之间", "", username)
 			return
 		}
 		if len(password) < 6 {
-			renderOAuthSetup(w, r, "密码长度至少 6 位", "", username)
+			oauthFail("密码长度至少 6 位", "", username)
 			return
 		}
 		if r.FormValue("confirm_password") != password {
-			renderOAuthSetup(w, r, "两次输入的密码不一致", "", username)
+			oauthFail("两次输入的密码不一致", "", username)
 			return
 		}
 		requireCode, _ := models.GetConfig("require_reg_code")
 		if requireCode == "true" && regCode == "" {
-			renderOAuthSetup(w, r, "", "请输入注册码", username)
+			oauthFail("", "请输入注册码", username)
 			return
 		}
 		hashed, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -4810,6 +4975,10 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 			// 原子占用注册码（与普通注册一致）
 			tx, err := models.DB.Begin()
 			if err != nil {
+				if ajaxRequest(r) {
+					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "form": "系统繁忙，请重试"})
+					return
+				}
 				http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
 				return
 			}
@@ -4817,22 +4986,30 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 				username, string(hashed), initPoints, "user", 1, "linuxdo", strconv.FormatInt(pendingUID, 10))
 			if err != nil {
 				tx.Rollback()
-				renderOAuthSetup(w, r, "用户名已存在或输入有误", "", username)
+				oauthFail("用户名已存在或输入有误", "", username)
 				return
 			}
 			uid, _ = res.LastInsertId()
 			res2, err := tx.Exec("UPDATE redeem_codes SET status='used', used_by=?, used_at=CURRENT_TIMESTAMP WHERE code=? AND status='active' AND (kind='' OR kind='register')", uid, regCode)
 			if err != nil {
 				tx.Rollback()
+				if ajaxRequest(r) {
+					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "form": "系统繁忙，请重试"})
+					return
+				}
 				http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
 				return
 			}
 			if n, _ := res2.RowsAffected(); n == 0 {
 				tx.Rollback()
-				renderOAuthSetup(w, r, "", "注册码无效或已被使用", username)
+				oauthFail("", "注册码无效或已被使用", username)
 				return
 			}
 			if err := tx.Commit(); err != nil {
+				if ajaxRequest(r) {
+					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "form": "系统繁忙，请重试"})
+					return
+				}
 				http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
 				return
 			}
@@ -4840,7 +5017,7 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 			res, err := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id) VALUES(?,?,?,?,?,?,?)",
 				username, string(hashed), initPoints, "user", 1, "linuxdo", strconv.FormatInt(pendingUID, 10))
 			if err != nil {
-				renderOAuthSetup(w, r, "用户名已存在或输入有误", "", username)
+				oauthFail("用户名已存在或输入有误", "", username)
 				return
 			}
 			uid, _ = res.LastInsertId()
@@ -4858,6 +5035,11 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 		s.Values["username"] = username
 		s.Values["role"] = "user"
 		s.Save(r, w)
+		if ajaxRequest(r) {
+			setFlash(w, r, "注册成功，欢迎加入，"+username)
+			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "redirect": oauthTarget(next)})
+			return
+		}
 		flashRedirect(w, r, oauthTarget(next), "注册成功，欢迎加入，"+username)
 		return
 	}
