@@ -392,11 +392,21 @@ a.link-primary { color: var(--primary); }
   border: 1px solid var(--border);
   border-radius: 14px;
   overflow: hidden;
+  /* 卡片等高：撑满所在列，内容区弹性伸展，底部操作区贴底对齐 */
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   transition: transform .18s ease, box-shadow .18s ease;
 }
 .record-card:hover {
   transform: translateY(-3px);
   box-shadow: 0 10px 26px -12px rgba(17, 24, 39, .18);
+}
+.record-search-btn {
+  /* 搜索按钮"搜索"两字保持单行不换行，并加宽按钮本体 */
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 84px;
 }
 .record-cover {
   width: 100%;
@@ -431,7 +441,12 @@ a.link-primary { color: var(--primary); }
   transition: transform .15s ease;
 }
 .record-subs img:hover { transform: scale(1.06); }
-.record-body { padding: .85rem 1rem 1rem; }
+.record-body {
+  padding: .85rem 1rem 1rem;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
 .record-prompt {
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -441,7 +456,16 @@ a.link-primary { color: var(--primary); }
   color: var(--text);
   min-height: 2.4em;
 }
-.record-foot { border-top: 1px dashed var(--border); }
+/* 错误信息预留区：成功与失败记录高度一致。
+   固定预留两行（错误摘要 + “本次积分已退回”），失败时填充内容。 */
+.record-error {
+  min-height: 2.55em;
+  flex-shrink: 0;
+}
+.record-foot {
+  border-top: 1px dashed var(--border);
+  margin-top: auto;
+}
 .text-bg-tint {
   background: rgba(99, 102, 241, .12) !important;
   color: #4f46e5 !important;
@@ -817,6 +841,81 @@ a.link-primary { color: var(--primary); }
 /* ---------- 系统设置：接口渠道行 ---------- */
 .endpoint-row { background: #fbfbfe; }
 .endpoint-row label { font-size: .8rem; }
+
+/* ---------- 系统设置：左侧分类标签 + 分区展示 ---------- */
+.settings-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: flex-start;
+  margin-bottom: 1rem;
+}
+.settings-nav-wrap { width: 100%; }
+.settings-nav {
+  display: flex;
+  gap: .35rem;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding: .3rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  scrollbar-width: none;
+}
+.settings-nav::-webkit-scrollbar { display: none; }
+.settings-nav-item {
+  flex-shrink: 0;
+  padding: .5rem .95rem;
+  border-radius: 10px;
+  font-size: .88rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  transition: background .15s ease, color .15s ease;
+  white-space: nowrap;
+}
+.settings-nav-item:hover { color: var(--text); background: var(--bg); }
+.settings-nav-item.active {
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--violet));
+  box-shadow: 0 4px 12px rgba(99, 102, 241, .3);
+}
+.settings-panes { width: 100%; min-width: 0; }
+.settings-pane { display: none; }
+.settings-pane.active { display: block; }
+
+/* 保存栏：吸底常驻，切换分类时仍可随时保存 */
+.settings-savebar {
+  position: sticky;
+  bottom: .75rem;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  align-items: center;
+  padding: .85rem 1rem;
+  background: rgba(255, 255, 255, .88);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-md);
+  margin-top: 1rem;
+}
+@media (min-width: 992px) {
+  .settings-layout { flex-direction: row; align-items: flex-start; gap: 1.25rem; }
+  .settings-nav-wrap {
+    width: 200px;
+    flex-shrink: 0;
+  }
+  .settings-nav {
+    flex-direction: column;
+    position: sticky;
+    top: 84px;
+    overflow: visible;
+  }
+  .settings-panes { flex: 1 1 auto; }
+}
 
 /* 公告内容：保留换行，长文本自动换行 */
 .text-pre-wrap {

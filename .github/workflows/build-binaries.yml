@@ -4,6 +4,12 @@ name: Build Native Binaries (Windows / macOS / Linux)
 # 用途：在未安装 Docker 的 Windows / macOS / Linux 上直接运行平台。
 # 说明：Docker 部署已通过 ghcr.io 镜像覆盖 amd64/arm64（Mac/Windows 的 Docker Desktop
 #       运行的是 Linux 容器，自动匹配对应架构）；本工作流提供的是“原生可执行文件”。
+#
+# 版本发布要求（详见 docs/release.md）：
+#   - 发布说明必须用中文并逐条写明本次变动内容，禁止只放自动生成的 "Full Changelog"；
+#   - 版本号在此处通过 -X main.AppVersion 注入可执行文件，设置页“关于与更新”据此
+#     在线检测新版本 / 在线更新；
+#   - 提交信息请使用中文，便于自动汇总生成发布说明。
 on:
   push:
     tags: ["v*"]
@@ -51,7 +57,8 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist/package
-          go build -trimpath -ldflags "-s -w" -o dist/package/app${{ matrix.ext }} .
+          # 注入真实版本号（如 v1.0.1），供设置页“关于与更新”显示与在线更新比较
+          go build -trimpath -ldflags "-s -w -X main.AppVersion=${GITHUB_REF_NAME}" -o dist/package/app${{ matrix.ext }} .
           cp -r templates static dist/package/
 
       - name: Package
@@ -78,11 +85,42 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: Generate Chinese release notes
+        run: |
+          # 详细中文发布说明：列出自上一个标签以来的全部提交。
+          # 提交信息本身使用中文（仓库约定，见 docs/release.md），
+          # 因此汇总即为逐条变动内容，禁止只发布 "Full Changelog"。
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          NOTESTMP=$(mktemp)
+          {
+            echo "## ${GITHUB_REF_NAME} 更新内容"
+            echo ""
+            if [ -n "$PREV_TAG" ]; then
+              echo "自 ${PREV_TAG} 以来的变动："
+              echo ""
+              git log --oneline --no-merges "${PREV_TAG}"..HEAD | sed 's/^/- /'
+            else
+              echo "首次发布，全部提交："
+              echo ""
+              git log --oneline --no-merges | sed 's/^/- /'
+            fi
+            echo ""
+            echo "> 下载对应平台的压缩包解压后运行 app（Windows 为 app.exe），数据保存在 data/ 目录。"
+            echo "> Docker 部署请使用 ghcr.io 镜像：docker compose pull && docker compose up -d"
+          } > "$NOTESTMP"
+          cp "$NOTESTMP" dist/RELEASE_NOTES.md
+          echo "NOTES_FILE=$NOTESTMP" >> "$GITHUB_ENV"
 
       - name: Publish to GitHub Release
         env:
@@ -90,8 +128,9 @@ jobs:
         run: |
           cd dist
           ls -lh
-          # 首次发布：创建 Release 并上传附件；tag 已存在（重跑）时改为只上传
+          # 首次发布：创建 Release 并上传附件与中文发布说明；
+          # tag 已存在（重跑）时改为只上传附件
           gh release create "${GITHUB_REF_NAME}" ./* \
             --repo "${{ github.repository }}" \
-            --generate-notes \
+            --notes-file "${NOTES_FILE}" \
             || gh release upload "${GITHUB_REF_NAME}" ./* --repo "${{ github.repository }}"

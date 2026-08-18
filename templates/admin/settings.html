@@ -9,448 +9,645 @@
         <button type="submit" class="btn btn-outline-danger btn-sm btn-loading" data-loading-text="..." data-confirm="确定恢复默认设置？站点名称、积分规则等将全部回归默认值，请谨慎操作。">恢复默认设置</button>
     </form>
 </div>
-<form method="POST" action="/admin/update-settings" data-submit="loading" autocomplete="off">
-    <input type="hidden" name="_csrf" value="{{.CSRF}}">
-    <div class="card app-card mb-4 fade-in-up">
-        <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">基本信息</h6></div>
-        <div class="card-body p-4">
-            <div class="row g-4">
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">站点名称</label>
-                    <input name="site_name" class="form-control" value="{{.Settings.site_name}}" placeholder="在线创作平台" autocomplete="off">
-                    <div class="form-text">显示在导航栏、页脚及页面标题中。</div>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">消耗积分 / 次</label>
-                    <input name="generation_cost_points" type="number" min="1" class="form-control" value="{{.Settings.generation_cost_points}}" autocomplete="off">
-                </div>
-            </div>
-        </div>
+
+<div class="settings-layout">
+    <div class="settings-nav-wrap">
+        <nav class="settings-nav" id="settingsNav" aria-label="设置分类">
+            <a class="settings-nav-item active" href="#basic" data-pane="basic">基本信息</a>
+            <a class="settings-nav-item" href="#register" data-pane="register">注册设置</a>
+            <a class="settings-nav-item" href="#checkin" data-pane="checkin">签到设置</a>
+            <a class="settings-nav-item" href="#endpoints" data-pane="endpoints">图片生成接口</a>
+            <a class="settings-nav-item" href="#oauth" data-pane="oauth">第三方登录</a>
+            <a class="settings-nav-item" href="#storage" data-pane="storage">图片存储</a>
+            <a class="settings-nav-item" href="#cleanup" data-pane="cleanup">自动清理</a>
+            <a class="settings-nav-item" href="#about" data-pane="about">关于与更新</a>
+        </nav>
     </div>
 
-    <div class="card app-card mb-4 fade-in-up">
-        <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">注册设置</h6></div>
-        <div class="card-body p-4">
-            <div class="row g-4">
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">开放注册</label>
-                    <select name="open_registration" class="form-select">
-                        <option value="true" {{if eq .Settings.open_registration "true"}}selected{{end}}>开启</option>
-                        <option value="false" {{if eq .Settings.open_registration "false"}}selected{{end}}>关闭</option>
-                    </select>
-                    <div class="form-text">总开关：关闭后任何方式都无法注册新账号。</div>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">开放用户密码注册</label>
-                    <select name="enable_password_registration" class="form-select">
-                        <option value="true" {{if eq .Settings.enable_password_registration "true"}}selected{{end}}>开启</option>
-                        <option value="false" {{if eq .Settings.enable_password_registration "false"}}selected{{end}}>关闭</option>
-                    </select>
-                    <div class="form-text">允许用户通过用户名+密码方式注册账号。</div>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">开放第三方注册</label>
-                    <select name="enable_thirdparty_registration" class="form-select">
-                        <option value="true" {{if eq .Settings.enable_thirdparty_registration "true"}}selected{{end}}>开启</option>
-                        <option value="false" {{if eq .Settings.enable_thirdparty_registration "false"}}selected{{end}}>关闭</option>
-                    </select>
-                    <div class="form-text">允许新用户通过 Linux.do 等第三方账号注册；关闭后仅已绑定账号可登录。</div>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">注册需注册码</label>
-                    <select name="require_reg_code" class="form-select">
-                        <option value="true" {{if eq .Settings.require_reg_code "true"}}selected{{end}}>需要</option>
-                        <option value="false" {{if eq .Settings.require_reg_code "false"}}selected{{end}}>不需要</option>
-                    </select>
-                    <div class="form-text">开启后，用户需凭兑换码方可注册。</div>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">新用户初始积分</label>
-                    <input name="initial_points" type="number" min="0" class="form-control" value="{{.Settings.initial_points}}" autocomplete="off">
+    <form method="POST" action="/admin/update-settings" data-submit="loading" autocomplete="off" class="settings-panes">
+        <input type="hidden" name="_csrf" value="{{.CSRF}}">
+
+        <section class="settings-pane active" data-pane="basic">
+            <div class="card app-card mb-4 fade-in-up">
+                <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">基本信息</h6></div>
+                <div class="card-body p-4">
+                    <div class="row g-4">
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">站点名称</label>
+                            <input name="site_name" class="form-control" value="{{.Settings.site_name}}" placeholder="在线创作平台" autocomplete="off">
+                            <div class="form-text">显示在导航栏、页脚及页面标题中。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">消耗积分 / 次</label>
+                            <input name="generation_cost_points" type="number" min="1" class="form-control" value="{{.Settings.generation_cost_points}}" autocomplete="off">
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-    </div>
+        </section>
 
-    <div class="card app-card mb-4 fade-in-up">
-        <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">签到设置</h6></div>
-        <div class="card-body p-4">
-            <div class="row g-4">
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">开启每日签到</label>
-                    <select name="enable_daily_checkin" class="form-select">
-                        <option value="true" {{if eq .Settings.enable_daily_checkin "true"}}selected{{end}}>开启</option>
-                        <option value="false" {{if eq .Settings.enable_daily_checkin "false"}}selected{{end}}>关闭</option>
-                    </select>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">签到模式</label>
-                    <select name="checkin_mode" class="form-select">
-                        <option value="fixed" {{if eq .Settings.checkin_mode "fixed"}}selected{{end}}>固定积分</option>
-                        <option value="random" {{if eq .Settings.checkin_mode "random"}}selected{{end}}>随机积分</option>
-                    </select>
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">固定积分额度</label>
-                    <input name="checkin_fixed_points" type="number" min="1" class="form-control" value="{{.Settings.checkin_fixed_points}}" autocomplete="off">
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">随机最小值</label>
-                    <input name="checkin_random_min" type="number" min="1" class="form-control" value="{{.Settings.checkin_random_min}}" autocomplete="off">
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">随机最大值</label>
-                    <input name="checkin_random_max" type="number" min="1" class="form-control" value="{{.Settings.checkin_random_max}}" autocomplete="off">
+        <section class="settings-pane" data-pane="register">
+            <div class="card app-card mb-4 fade-in-up">
+                <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">注册设置</h6></div>
+                <div class="card-body p-4">
+                    <div class="row g-4">
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">开放注册</label>
+                            <select name="open_registration" class="form-select">
+                                <option value="true" {{if eq .Settings.open_registration "true"}}selected{{end}}>开启</option>
+                                <option value="false" {{if eq .Settings.open_registration "false"}}selected{{end}}>关闭</option>
+                            </select>
+                            <div class="form-text">总开关：关闭后任何方式都无法注册新账号。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">开放用户密码注册</label>
+                            <select name="enable_password_registration" class="form-select">
+                                <option value="true" {{if eq .Settings.enable_password_registration "true"}}selected{{end}}>开启</option>
+                                <option value="false" {{if eq .Settings.enable_password_registration "false"}}selected{{end}}>关闭</option>
+                            </select>
+                            <div class="form-text">允许用户通过用户名+密码方式注册账号。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">开放第三方注册</label>
+                            <select name="enable_thirdparty_registration" class="form-select">
+                                <option value="true" {{if eq .Settings.enable_thirdparty_registration "true"}}selected{{end}}>开启</option>
+                                <option value="false" {{if eq .Settings.enable_thirdparty_registration "false"}}selected{{end}}>关闭</option>
+                            </select>
+                            <div class="form-text">允许新用户通过 Linux.do 等第三方账号注册；关闭后仅已绑定账号可登录。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">注册需注册码</label>
+                            <select name="require_reg_code" class="form-select">
+                                <option value="true" {{if eq .Settings.require_reg_code "true"}}selected{{end}}>需要</option>
+                                <option value="false" {{if eq .Settings.require_reg_code "false"}}selected{{end}}>不需要</option>
+                            </select>
+                            <div class="form-text">开启后，用户需凭兑换码方可注册。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">新用户初始积分</label>
+                            <input name="initial_points" type="number" min="0" class="form-control" value="{{.Settings.initial_points}}" autocomplete="off">
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-    </div>
+        </section>
 
-    <div class="card app-card mb-4 fade-in-up">
-        <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">图片生成接口（多渠道）</h6></div>
-        <div class="card-body p-4">
-            <p class="text-muted small mb-3">支持配置多个生成接口渠道，可留空不填。生成时默认使用<strong>普通渠道</strong>；用户开启 NSFW 后使用<strong>NSFW 渠道</strong>。API Key 已配置时仅显示前 10 位、其余以 * 隐藏；留空或保持掩码不变即保留已保存的密钥，直接输入新密钥可替换。地址为空的行会被忽略；全部留空则停用图片生成。</p>
-            <div id="endpointRows">
-                {{if .Endpoints}}
-                {{range $i, $ep := .Endpoints}}
-                <div class="endpoint-row border rounded-3 p-3 mb-3 bg-white">
-                    <div class="row g-3">
-                        <div class="col-md-2">
-                            <label class="form-label fw-semibold">渠道名称</label>
-                            <input name="ep_name[]" class="form-control" value="{{$ep.Name}}" placeholder="主渠道" autocomplete="off">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label fw-semibold">API 地址</label>
-                            <input name="ep_url[]" class="form-control" value="{{$ep.APIURL}}" placeholder="https://grok.example.com/v1" autocomplete="off">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label fw-semibold">API Key</label>
-                            <input name="ep_key[]" type="text" class="form-control" autocomplete="off" value="{{maskKey $ep.APIKey}}" placeholder="粘贴 g2a_...">
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label fw-semibold">默认模型</label>
-                            <input name="ep_model[]" class="form-control" list="ep-model-list" value="{{$ep.Model}}" placeholder="grok-imagine-image-lite" autocomplete="off">
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label fw-semibold">NSFW 渠道</label>
-                            <select name="ep_nsfw[]" class="form-select">
-                                <option value="0" {{if not $ep.NSFW}}selected{{end}}>否</option>
-                                <option value="1" {{if $ep.NSFW}}selected{{end}}>是</option>
+        <section class="settings-pane" data-pane="checkin">
+            <div class="card app-card mb-4 fade-in-up">
+                <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">签到设置</h6></div>
+                <div class="card-body p-4">
+                    <div class="row g-4">
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">开启每日签到</label>
+                            <select name="enable_daily_checkin" class="form-select">
+                                <option value="true" {{if eq .Settings.enable_daily_checkin "true"}}selected{{end}}>开启</option>
+                                <option value="false" {{if eq .Settings.enable_daily_checkin "false"}}selected{{end}}>关闭</option>
                             </select>
                         </div>
-                    </div>
-                    <div class="row g-3 mt-1">
                         <div class="col-md-6">
-                            <label class="form-label fw-semibold">支持分辨率档位</label>
-                            <div class="d-flex flex-wrap gap-3 pt-1">
-                                {{$res1 := "1k"}}{{$res2 := "2k"}}{{$res4 := "4k"}}
-                                <span class="ep-res-check">
-                                    <input class="form-check-input" type="checkbox" id="res1k-{{$i}}" data-res="1k" {{if hasRes $ep.Resolutions "1k"}}checked{{end}}>
-                                    <label class="form-check-label small" for="res1k-{{$i}}">1k</label>
-                                </span>
-                                <span class="ep-res-check">
-                                    <input class="form-check-input" type="checkbox" id="res2k-{{$i}}" data-res="2k" {{if hasRes $ep.Resolutions "2k"}}checked{{end}}>
-                                    <label class="form-check-label small" for="res2k-{{$i}}">2k</label>
-                                </span>
-                                <span class="ep-res-check">
-                                    <input class="form-check-input" type="checkbox" id="res4k-{{$i}}" data-res="4k" {{if hasRes $ep.Resolutions "4k"}}checked{{end}}>
-                                    <label class="form-check-label small" for="res4k-{{$i}}">4k</label>
-                                </span>
-                            </div>
-                            <input type="hidden" name="ep_res[]" class="ep-res-input" value="{{range $i2, $r2 := $ep.Resolutions}}{{if $i2}},{{end}}{{$r2}}{{end}}">
-                            <div class="form-text">用户创作时只能选择勾选的档位（可多选）；全不勾选则默认提供 1k,2k。</div>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label fw-semibold">可用模型（多选）</label>
-                            <div class="d-flex flex-wrap gap-3 pt-1">
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" id="mdl-lite-{{$i}}" data-model="grok-imagine-image-lite" {{if hasRes $ep.Models "grok-imagine-image-lite"}}checked{{end}}>
-                                    <label class="form-check-label small" for="mdl-lite-{{$i}}">grok-imagine-image-lite</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" id="mdl-img-{{$i}}" data-model="grok-imagine-image" {{if hasRes $ep.Models "grok-imagine-image"}}checked{{end}}>
-                                    <label class="form-check-label small" for="mdl-img-{{$i}}">grok-imagine-image</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" id="mdl-edit-{{$i}}" data-model="grok-imagine-image-edit" {{if hasRes $ep.Models "grok-imagine-image-edit"}}checked{{end}}>
-                                    <label class="form-check-label small" for="mdl-edit-{{$i}}">grok-imagine-image-edit</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" id="mdl-2-{{$i}}" data-model="grok-imagine-image-2.0" {{if hasRes $ep.Models "grok-imagine-image-2.0"}}checked{{end}}>
-                                    <label class="form-check-label small" for="mdl-2-{{$i}}">grok-imagine-image-2.0</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" id="mdl-vid-{{$i}}" data-model="grok-imagine-video" {{if hasRes $ep.Models "grok-imagine-video"}}checked{{end}}>
-                                    <label class="form-check-label small" for="mdl-vid-{{$i}}">grok-imagine-video</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" id="mdl-gpt2-{{$i}}" data-model="gpt-image-2" {{if hasRes $ep.Models "gpt-image-2"}}checked{{end}}>
-                                    <label class="form-check-label small" for="mdl-gpt2-{{$i}}">gpt-image-2</label>
-                                </span>
-                            </div>
-                            <input type="hidden" name="ep_models[]" class="ep-models-input" value="{{range $i2, $m2 := $ep.Models}}{{if $i2}},{{end}}{{$m2}}{{end}}">
-                            <input name="ep_extra_models[]" class="ep-extra-models form-control form-control-sm mt-2" autocomplete="off" placeholder="自定义模型（逗号分隔），如 my-model-1, my-model-2">
-                            <div class="form-text">用户创作时可在所选渠道勾选的模型中切换；默认模型见上方输入框（可手动输入自定义模型）。</div>
-                        </div>
-                    </div>
-                    <div class="mt-2 text-end">
-                        <button type="button" class="btn btn-sm btn-outline-danger endpoint-del">删除此渠道</button>
-                    </div>
-                </div>
-                {{end}}
-                {{else}}
-                <div class="endpoint-row border rounded-3 p-3 mb-3 bg-white">
-                    <div class="row g-3">
-                        <div class="col-md-2">
-                            <label class="form-label fw-semibold">渠道名称</label>
-                            <input name="ep_name[]" class="form-control" placeholder="主渠道" autocomplete="off">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label fw-semibold">API 地址</label>
-                            <input name="ep_url[]" class="form-control" placeholder="https://grok.example.com/v1" autocomplete="off">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label fw-semibold">API Key</label>
-                            <input name="ep_key[]" type="text" class="form-control" autocomplete="off" placeholder="粘贴 g2a_...">
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label fw-semibold">默认模型</label>
-                            <input name="ep_model[]" class="form-control" list="ep-model-list" placeholder="grok-imagine-image-lite" autocomplete="off">
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label fw-semibold">NSFW 渠道</label>
-                            <select name="ep_nsfw[]" class="form-select">
-                                <option value="0" selected>否</option>
-                                <option value="1">是</option>
+                            <label class="form-label fw-semibold">签到模式</label>
+                            <select name="checkin_mode" class="form-select">
+                                <option value="fixed" {{if eq .Settings.checkin_mode "fixed"}}selected{{end}}>固定积分</option>
+                                <option value="random" {{if eq .Settings.checkin_mode "random"}}selected{{end}}>随机积分</option>
                             </select>
                         </div>
-                    </div>
-                    <div class="row g-3 mt-1">
-                        <div class="col-md-6">
-                            <label class="form-label fw-semibold">支持分辨率档位</label>
-                            <div class="d-flex flex-wrap gap-3 pt-1">
-                                <span class="ep-res-check">
-                                    <input class="form-check-input" type="checkbox" data-res="1k" checked>
-                                    <label class="form-check-label small">1k</label>
-                                </span>
-                                <span class="ep-res-check">
-                                    <input class="form-check-input" type="checkbox" data-res="2k" checked>
-                                    <label class="form-check-label small">2k</label>
-                                </span>
-                                <span class="ep-res-check">
-                                    <input class="form-check-input" type="checkbox" data-res="4k">
-                                    <label class="form-check-label small">4k</label>
-                                </span>
-                            </div>
-                            <input type="hidden" name="ep_res[]" class="ep-res-input" value="1k,2k">
-                            <div class="form-text">用户创作时只能选择勾选的档位（可多选）；全不勾选则默认提供 1k,2k。</div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">固定积分额度</label>
+                            <input name="checkin_fixed_points" type="number" min="1" class="form-control" value="{{.Settings.checkin_fixed_points}}" autocomplete="off">
                         </div>
-                        <div class="col-md-6">
-                            <label class="form-label fw-semibold">可用模型（多选）</label>
-                            <div class="d-flex flex-wrap gap-3 pt-1">
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" data-model="grok-imagine-image-lite" checked>
-                                    <label class="form-check-label small">grok-imagine-image-lite</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" data-model="grok-imagine-image" checked>
-                                    <label class="form-check-label small">grok-imagine-image</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" data-model="grok-imagine-image-edit" checked>
-                                    <label class="form-check-label small">grok-imagine-image-edit</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" data-model="grok-imagine-image-2.0" checked>
-                                    <label class="form-check-label small">grok-imagine-image-2.0</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" data-model="grok-imagine-video" checked>
-                                    <label class="form-check-label small">grok-imagine-video</label>
-                                </span>
-                                <span class="ep-model-check">
-                                    <input class="form-check-input" type="checkbox" data-model="gpt-image-2" checked>
-                                    <label class="form-check-label small">gpt-image-2</label>
-                                </span>
-                            </div>
-                            <input type="hidden" name="ep_models[]" class="ep-models-input" value="grok-imagine-image-lite,grok-imagine-image,grok-imagine-image-edit,grok-imagine-image-2.0,grok-imagine-video,gpt-image-2">
-                            <input name="ep_extra_models[]" class="ep-extra-models form-control form-control-sm mt-2" autocomplete="off" placeholder="自定义模型（逗号分隔），如 my-model-1, my-model-2">
-                            <div class="form-text">用户创作时可在所选渠道勾选的模型中切换；默认模型见上方输入框（可手动输入自定义模型）。</div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">随机最小值</label>
+                            <input name="checkin_random_min" type="number" min="1" class="form-control" value="{{.Settings.checkin_random_min}}" autocomplete="off">
                         </div>
-                    </div>
-                    <div class="mt-2 text-end">
-                        <button type="button" class="btn btn-sm btn-outline-danger endpoint-del">删除此渠道</button>
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">随机最大值</label>
+                            <input name="checkin_random_max" type="number" min="1" class="form-control" value="{{.Settings.checkin_random_max}}" autocomplete="off">
+                        </div>
                     </div>
                 </div>
-                {{end}}
             </div>
-            <datalist id="ep-model-list">
-                <option value="grok-imagine-image-lite"></option>
-                <option value="grok-imagine-image"></option>
-                <option value="grok-imagine-image-edit"></option>
-                <option value="grok-imagine-image-2.0"></option>
-                <option value="grok-imagine-video"></option>
-                <option value="gpt-image-2"></option>
-            </datalist>
-            <div class="d-flex gap-2 align-items-center">
-                <button type="button" class="btn btn-sm btn-outline-primary" id="addEndpoint">＋ 添加接口</button>
-                <span class="text-muted small">普通渠道与 NSFW 渠道可各配置一个或多个，按保存顺序取第一个匹配的渠道。</span>
-            </div>
-        </div>
-    </div>
+        </section>
 
-    <div class="card app-card mb-4 fade-in-up">
-        <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">第三方登录（Linux.do）</h6></div>
-        <div class="card-body p-4">
-            <div class="row g-4">
-                <div class="col-md-12">
-                    <label class="form-label fw-semibold">开启第三方登录</label>
-                    <select name="enable_thirdparty_login" class="form-select">
-                        <option value="true" {{if eq .Settings.enable_thirdparty_login "true"}}selected{{end}}>开启</option>
-                        <option value="false" {{if eq .Settings.enable_thirdparty_login "false"}}selected{{end}}>关闭</option>
-                    </select>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">Client ID</label>
-                    <input name="linuxdo_client_id" class="form-control" value="{{.Settings.linuxdo_client_id}}" autocomplete="off">
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">Client Secret</label>
-                    <input name="linuxdo_client_secret" type="password" class="form-control" value="" autocomplete="new-password" placeholder="{{if .Settings.linuxdo_client_secret}}已配置（留空则不修改）{{else}}尚未配置{{end}}">
-                </div>
-                <div class="col-md-12">
-                    <label class="form-label fw-semibold">Redirect URI（回调地址）</label>
-                    <div class="input-group">
-                        <input name="linuxdo_redirect_uri" class="form-control font-monospace" value="{{if .Settings.linuxdo_redirect_uri}}{{.Settings.linuxdo_redirect_uri}}{{end}}" placeholder="{{.LdoDefaultCallback}}" autocomplete="off">
-                        <button type="button" class="btn btn-outline-secondary" id="ldoFillCallback" title="将本平台自动识别的回调地址填入输入框">填入当前地址</button>
-                        <button type="button" class="btn btn-outline-secondary" id="ldoCopyCallback" title="复制本平台自动识别的回调地址">复制</button>
-                    </div>
-                    <div class="form-text mt-2">
-                        请在 <a href="https://connect.linux.do" target="_blank" rel="noopener">Linux.do 开发者后台</a>（Linux.do Connect 官网登录后创建应用）中把应用的 Callback URL 填写为：<code class="user-select-all">{{.LdoDefaultCallback}}</code>，两边必须完全一致，否则授权会失败。本输入框保存后即持久化；<strong>留空保存 = 自动模式</strong>：每次按当前站点地址动态使用该回调地址，更换域名后无需改动。
-                        {{if and .Settings.linuxdo_redirect_uri (ne .Settings.linuxdo_redirect_uri .LdoDefaultCallback)}}
-                        <div class="alert alert-warning py-2 small mt-2 mb-0">当前保存的 Redirect URI（<code>{{.Settings.linuxdo_redirect_uri}}</code>）与本页自动识别的回调地址不一致。如需改回自动模式，请清空输入框后保存。</div>
+        <section class="settings-pane" data-pane="endpoints">
+            <div class="card app-card mb-4 fade-in-up">
+                <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">图片生成接口（多渠道）</h6></div>
+                <div class="card-body p-4">
+                    <p class="text-muted small mb-3">支持配置多个生成接口渠道，可留空不填。生成时默认使用<strong>普通渠道</strong>；用户开启 NSFW 后使用<strong>NSFW 渠道</strong>。API Key 已配置时仅显示前 10 位、其余以 * 隐藏；留空或保持掩码不变即保留已保存的密钥，直接输入新密钥可替换。地址为空的行会被忽略；全部留空则停用图片生成。</p>
+                    <div id="endpointRows">
+                        {{if .Endpoints}}
+                        {{range $i, $ep := .Endpoints}}
+                        <div class="endpoint-row border rounded-3 p-3 mb-3 bg-white">
+                            <input type="hidden" name="ep_id[]" value="{{$ep.ID}}">
+                            <div class="row g-3">
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold d-flex align-items-center gap-1">渠道名称 <span class="badge text-bg-light" title="渠道稳定编号：创建时分配、不随增删/排序变化，即 API 调用 channel 参数取值">编号 {{$ep.ID}}</span></label>
+                                    <input name="ep_name[]" class="form-control" value="{{$ep.Name}}" placeholder="主渠道" autocomplete="off">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label fw-semibold">API 地址</label>
+                                    <input name="ep_url[]" class="form-control" value="{{$ep.APIURL}}" placeholder="https://grok.example.com/v1" autocomplete="off">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label fw-semibold">API Key</label>
+                                    <input name="ep_key[]" type="text" class="form-control" autocomplete="off" value="{{maskKey $ep.APIKey}}" placeholder="粘贴 g2a_...">
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold">默认模型</label>
+                                    <input name="ep_model[]" class="form-control" list="ep-model-list" value="{{$ep.Model}}" placeholder="grok-imagine-image-lite" autocomplete="off">
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold">NSFW 渠道</label>
+                                    <select name="ep_nsfw[]" class="form-select">
+                                        <option value="0" {{if not $ep.NSFW}}selected{{end}}>否</option>
+                                        <option value="1" {{if $ep.NSFW}}selected{{end}}>是</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="row g-3 mt-1">
+                                <div class="col-md-6">
+                                    <label class="form-label fw-semibold">支持分辨率档位</label>
+                                    <div class="d-flex flex-wrap gap-3 pt-1">
+                                        {{$res1 := "1k"}}{{$res2 := "2k"}}{{$res4 := "4k"}}
+                                        <span class="ep-res-check">
+                                            <input class="form-check-input" type="checkbox" id="res1k-{{$i}}" data-res="1k" {{if hasRes $ep.Resolutions "1k"}}checked{{end}}>
+                                            <label class="form-check-label small" for="res1k-{{$i}}">1k</label>
+                                        </span>
+                                        <span class="ep-res-check">
+                                            <input class="form-check-input" type="checkbox" id="res2k-{{$i}}" data-res="2k" {{if hasRes $ep.Resolutions "2k"}}checked{{end}}>
+                                            <label class="form-check-label small" for="res2k-{{$i}}">2k</label>
+                                        </span>
+                                        <span class="ep-res-check">
+                                            <input class="form-check-input" type="checkbox" id="res4k-{{$i}}" data-res="4k" {{if hasRes $ep.Resolutions "4k"}}checked{{end}}>
+                                            <label class="form-check-label small" for="res4k-{{$i}}">4k</label>
+                                        </span>
+                                    </div>
+                                    <input type="hidden" name="ep_res[]" class="ep-res-input" value="{{range $i2, $r2 := $ep.Resolutions}}{{if $i2}},{{end}}{{$r2}}{{end}}">
+                                    <div class="form-text">用户创作时只能选择勾选的档位（可多选）；全不勾选则默认提供 1k,2k。</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label fw-semibold">可用模型（多选）</label>
+                                    <div class="d-flex flex-wrap gap-3 pt-1">
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" id="mdl-lite-{{$i}}" data-model="grok-imagine-image-lite" {{if hasRes $ep.Models "grok-imagine-image-lite"}}checked{{end}}>
+                                            <label class="form-check-label small" for="mdl-lite-{{$i}}">grok-imagine-image-lite</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" id="mdl-img-{{$i}}" data-model="grok-imagine-image" {{if hasRes $ep.Models "grok-imagine-image"}}checked{{end}}>
+                                            <label class="form-check-label small" for="mdl-img-{{$i}}">grok-imagine-image</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" id="mdl-edit-{{$i}}" data-model="grok-imagine-image-edit" {{if hasRes $ep.Models "grok-imagine-image-edit"}}checked{{end}}>
+                                            <label class="form-check-label small" for="mdl-edit-{{$i}}">grok-imagine-image-edit</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" id="mdl-2-{{$i}}" data-model="grok-imagine-image-2.0" {{if hasRes $ep.Models "grok-imagine-image-2.0"}}checked{{end}}>
+                                            <label class="form-check-label small" for="mdl-2-{{$i}}">grok-imagine-image-2.0</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" id="mdl-vid-{{$i}}" data-model="grok-imagine-video" {{if hasRes $ep.Models "grok-imagine-video"}}checked{{end}}>
+                                            <label class="form-check-label small" for="mdl-vid-{{$i}}">grok-imagine-video</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" id="mdl-gpt2-{{$i}}" data-model="gpt-image-2" {{if hasRes $ep.Models "gpt-image-2"}}checked{{end}}>
+                                            <label class="form-check-label small" for="mdl-gpt2-{{$i}}">gpt-image-2</label>
+                                        </span>
+                                    </div>
+                                    <input type="hidden" name="ep_models[]" class="ep-models-input" value="{{range $i2, $m2 := $ep.Models}}{{if $i2}},{{end}}{{$m2}}{{end}}">
+                                    <input name="ep_extra_models[]" class="ep-extra-models form-control form-control-sm mt-2" autocomplete="off" placeholder="自定义模型（逗号分隔），如 my-model-1, my-model-2">
+                                    <div class="form-text">用户创作时可在所选渠道勾选的模型中切换；默认模型见上方输入框（可手动输入自定义模型）。</div>
+                                </div>
+                            </div>
+                            <div class="mt-2 text-end">
+                                <button type="button" class="btn btn-sm btn-outline-danger endpoint-del">删除此渠道</button>
+                            </div>
+                        </div>
+                        {{end}}
+                        {{else}}
+                        <div class="endpoint-row border rounded-3 p-3 mb-3 bg-white">
+                            <input type="hidden" name="ep_id[]" value="">
+                            <div class="row g-3">
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold d-flex align-items-center gap-1">渠道名称 <span class="badge text-bg-light" title="新增渠道保存后自动分配稳定编号；编号即 API 调用 channel 参数取值">编号 自动</span></label>
+                                    <input name="ep_name[]" class="form-control" placeholder="主渠道" autocomplete="off">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label fw-semibold">API 地址</label>
+                                    <input name="ep_url[]" class="form-control" placeholder="https://grok.example.com/v1" autocomplete="off">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label fw-semibold">API Key</label>
+                                    <input name="ep_key[]" type="text" class="form-control" autocomplete="off" placeholder="粘贴 g2a_...">
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold">默认模型</label>
+                                    <input name="ep_model[]" class="form-control" list="ep-model-list" placeholder="grok-imagine-image-lite" autocomplete="off">
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold">NSFW 渠道</label>
+                                    <select name="ep_nsfw[]" class="form-select">
+                                        <option value="0" selected>否</option>
+                                        <option value="1">是</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="row g-3 mt-1">
+                                <div class="col-md-6">
+                                    <label class="form-label fw-semibold">支持分辨率档位</label>
+                                    <div class="d-flex flex-wrap gap-3 pt-1">
+                                        <span class="ep-res-check">
+                                            <input class="form-check-input" type="checkbox" data-res="1k" checked>
+                                            <label class="form-check-label small">1k</label>
+                                        </span>
+                                        <span class="ep-res-check">
+                                            <input class="form-check-input" type="checkbox" data-res="2k" checked>
+                                            <label class="form-check-label small">2k</label>
+                                        </span>
+                                        <span class="ep-res-check">
+                                            <input class="form-check-input" type="checkbox" data-res="4k">
+                                            <label class="form-check-label small">4k</label>
+                                        </span>
+                                    </div>
+                                    <input type="hidden" name="ep_res[]" class="ep-res-input" value="1k,2k">
+                                    <div class="form-text">用户创作时只能选择勾选的档位（可多选）；全不勾选则默认提供 1k,2k。</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label fw-semibold">可用模型（多选）</label>
+                                    <div class="d-flex flex-wrap gap-3 pt-1">
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" data-model="grok-imagine-image-lite" checked>
+                                            <label class="form-check-label small">grok-imagine-image-lite</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" data-model="grok-imagine-image" checked>
+                                            <label class="form-check-label small">grok-imagine-image</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" data-model="grok-imagine-image-edit" checked>
+                                            <label class="form-check-label small">grok-imagine-image-edit</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" data-model="grok-imagine-image-2.0" checked>
+                                            <label class="form-check-label small">grok-imagine-image-2.0</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" data-model="grok-imagine-video" checked>
+                                            <label class="form-check-label small">grok-imagine-video</label>
+                                        </span>
+                                        <span class="ep-model-check">
+                                            <input class="form-check-input" type="checkbox" data-model="gpt-image-2" checked>
+                                            <label class="form-check-label small">gpt-image-2</label>
+                                        </span>
+                                    </div>
+                                    <input type="hidden" name="ep_models[]" class="ep-models-input" value="grok-imagine-image-lite,grok-imagine-image,grok-imagine-image-edit,grok-imagine-image-2.0,grok-imagine-video,gpt-image-2">
+                                    <input name="ep_extra_models[]" class="ep-extra-models form-control form-control-sm mt-2" autocomplete="off" placeholder="自定义模型（逗号分隔），如 my-model-1, my-model-2">
+                                    <div class="form-text">用户创作时可在所选渠道勾选的模型中切换；默认模型见上方输入框（可手动输入自定义模型）。</div>
+                                </div>
+                            </div>
+                            <div class="mt-2 text-end">
+                                <button type="button" class="btn btn-sm btn-outline-danger endpoint-del">删除此渠道</button>
+                            </div>
+                        </div>
                         {{end}}
                     </div>
+                    <datalist id="ep-model-list">
+                        <option value="grok-imagine-image-lite"></option>
+                        <option value="grok-imagine-image"></option>
+                        <option value="grok-imagine-image-edit"></option>
+                        <option value="grok-imagine-image-2.0"></option>
+                        <option value="grok-imagine-video"></option>
+                        <option value="gpt-image-2"></option>
+                    </datalist>
+                    <div class="d-flex gap-2 align-items-center">
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="addEndpoint">＋ 添加接口</button>
+                        <span class="text-muted small">普通渠道与 NSFW 渠道可各配置一个或多个，按保存顺序取第一个匹配的渠道。</span>
+                    </div>
                 </div>
             </div>
-        </div>
-    </div>
+        </section>
 
-    <div class="card app-card mb-4 fade-in-up">
-        <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">图片存储</h6></div>
-        <div class="card-body p-4">
-            <p class="text-muted small mb-3">生成的图片默认保存在服务器本地（data/images）。可启用<strong>外部长期存储</strong>：图片在服务器下载落盘后会自动上传一份到外部存储（S3 兼容对象存储 / WebDAV / 通用 POST 上传接口），此后服务器本地文件即使被自动清理，用户仍可通过“备用下载”地址取回图片。图片的存储方式与远端路径会记录在每条记录中。</p>
-            <div class="row g-4">
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">存储方式</label>
-                    <select name="storage_type" class="form-select">
-                        <option value="" {{if or (eq .Settings.storage_type "") (eq .Settings.storage_type "none")}}selected{{end}}>不启用（仅服务器本地）</option>
-                        <option value="s3" {{if eq .Settings.storage_type "s3"}}selected{{end}}>S3 兼容对象存储</option>
-                        <option value="webdav" {{if eq .Settings.storage_type "webdav"}}selected{{end}}>WebDAV</option>
-                        <option value="post" {{if eq .Settings.storage_type "post"}}selected{{end}}>POST 上传接口</option>
-                    </select>
-                </div>
-                <div class="col-md-8">
-                    <label class="form-label fw-semibold">端点地址</label>
-                    <input name="storage_endpoint" class="form-control" value="{{.Settings.storage_endpoint}}" placeholder="s3: https://oss.example.com   |   webdav: https://dav.example.com/dav   |   post: https://upload.example.com/api" autocomplete="off">
-                    <div class="form-text">S3 为对象存储服务地址；WebDAV 为根目录地址；POST 为完整的上传接口 URL。</div>
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">Bucket（S3）</label>
-                    <input name="storage_bucket" class="form-control" value="{{.Settings.storage_bucket}}" placeholder="my-bucket" autocomplete="off">
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">Region（S3）</label>
-                    <input name="storage_region" class="form-control" value="{{.Settings.storage_region}}" placeholder="us-east-1" autocomplete="off">
-                    <div class="form-text">S3 签名所用区域（如 us-east-1 / ap-northeast-1 / oss-cn-hangzhou），默认 us-east-1。</div>
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">用户名 / AccessKey</label>
-                    <input name="storage_username" class="form-control" value="{{.Settings.storage_username}}" placeholder="S3: AccessKey ID；WebDAV: 用户名；POST: 留空" autocomplete="off">
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">密码 / SecretKey</label>
-                    <input name="storage_password" type="password" class="form-control" value="" autocomplete="new-password" placeholder="{{if .Settings.storage_password}}已配置（留空则不修改）{{else}}S3: SecretKey；WebDAV: 密码{{end}}">
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-semibold">远端路径前缀</label>
-                    <input name="storage_path_prefix" class="form-control" value="{{.Settings.storage_path_prefix}}" placeholder="images（可选）" autocomplete="off">
-                    <div class="form-text">上传到外部存储的目录前缀，如 images；留空则直接放在根下。POST 方式下额外作为 path 表单字段提交。</div>
+        <section class="settings-pane" data-pane="oauth">
+            <div class="card app-card mb-4 fade-in-up">
+                <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">第三方登录（Linux.do）</h6></div>
+                <div class="card-body p-4">
+                    <div class="row g-4">
+                        <div class="col-md-12">
+                            <label class="form-label fw-semibold">开启第三方登录</label>
+                            <select name="enable_thirdparty_login" class="form-select">
+                                <option value="true" {{if eq .Settings.enable_thirdparty_login "true"}}selected{{end}}>开启</option>
+                                <option value="false" {{if eq .Settings.enable_thirdparty_login "false"}}selected{{end}}>关闭</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">Client ID</label>
+                            <input name="linuxdo_client_id" class="form-control" value="{{.Settings.linuxdo_client_id}}" autocomplete="off">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">Client Secret</label>
+                            <input name="linuxdo_client_secret" type="password" class="form-control" value="" autocomplete="new-password" placeholder="{{if .Settings.linuxdo_client_secret}}已配置（留空则不修改）{{else}}尚未配置{{end}}">
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label fw-semibold">Redirect URI（回调地址）</label>
+                            <div class="input-group">
+                                <input name="linuxdo_redirect_uri" class="form-control font-monospace" value="{{if .Settings.linuxdo_redirect_uri}}{{.Settings.linuxdo_redirect_uri}}{{end}}" placeholder="{{.LdoDefaultCallback}}" autocomplete="off">
+                                <button type="button" class="btn btn-outline-secondary" id="ldoFillCallback" title="将本平台自动识别的回调地址填入输入框">填入当前地址</button>
+                                <button type="button" class="btn btn-outline-secondary" id="ldoCopyCallback" title="复制本平台自动识别的回调地址">复制</button>
+                            </div>
+                            <div class="form-text mt-2">
+                                请在 <a href="https://connect.linux.do" target="_blank" rel="noopener">Linux.do 开发者后台</a>（Linux.do Connect 官网登录后创建应用）中把应用的 Callback URL 填写为：<code class="user-select-all">{{.LdoDefaultCallback}}</code>，两边必须完全一致，否则授权会失败。本输入框保存后即持久化；<strong>留空保存 = 自动模式</strong>：每次按当前站点地址动态使用该回调地址，更换域名后无需改动。
+                                {{if and .Settings.linuxdo_redirect_uri (ne .Settings.linuxdo_redirect_uri .LdoDefaultCallback)}}
+                                <div class="alert alert-warning py-2 small mt-2 mb-0">当前保存的 Redirect URI（<code>{{.Settings.linuxdo_redirect_uri}}</code>）与本页自动识别的回调地址不一致。如需改回自动模式，请清空输入框后保存。</div>
+                                {{end}}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-    </div>
+        </section>
 
-    <div class="card app-card mb-4 fade-in-up">
-        <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">自动清理</h6></div>
-        <div class="card-body p-4">
-            <p class="text-muted small mb-3">防止服务器磁盘被历史图片占满。启用后按以下两条规则自动清理：① 超过<strong>保留天数</strong>的旧记录会被清理；② 本地图片目录超过<strong>磁盘上限</strong>时按旧到新删除，直到低于上限。已上传外部存储的图片在清理时仅删除本地文件，保留记录与备用下载地址，用户可以继续访问。</p>
-            <div class="row g-4">
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">启用自动清理</label>
-                    <select name="cleanup_enabled" class="form-select">
-                        <option value="true" {{if eq .Settings.cleanup_enabled "true"}}selected{{end}}>开启</option>
-                        <option value="false" {{if ne .Settings.cleanup_enabled "true"}}selected{{end}}>关闭</option>
-                    </select>
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">保留天数</label>
-                    <input name="cleanup_keep_days" type="number" min="1" class="form-control" value="{{if .Settings.cleanup_keep_days}}{{.Settings.cleanup_keep_days}}{{else}}30{{end}}" autocomplete="off">
-                    <div class="form-text">超过该天数的旧记录会被清理（默认 30 天）。</div>
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">磁盘上限（MB）</label>
-                    <input name="cleanup_max_mb" type="number" min="1" class="form-control" value="{{if .Settings.cleanup_max_mb}}{{.Settings.cleanup_max_mb}}{{else}}2048{{end}}" autocomplete="off">
-                    <div class="form-text">data/images 目录超过该大小即触发按旧到新清理（默认 2048 MB）。</div>
+        <section class="settings-pane" data-pane="storage">
+            <div class="card app-card mb-4 fade-in-up">
+                <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">图片存储</h6></div>
+                <div class="card-body p-4">
+                    <p class="text-muted small mb-3">生成的图片默认保存在服务器本地（data/images）。可启用<strong>外部长期存储</strong>：图片在服务器下载落盘后会自动上传一份到外部存储（S3 兼容对象存储 / WebDAV / 通用 POST 上传接口），此后服务器本地文件即使被自动清理，用户仍可通过“备用下载”地址取回图片。图片的存储方式与远端路径会记录在每条记录中。</p>
+                    <div class="row g-4">
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">存储方式</label>
+                            <select name="storage_type" class="form-select">
+                                <option value="" {{if or (eq .Settings.storage_type "") (eq .Settings.storage_type "none")}}selected{{end}}>不启用（仅服务器本地）</option>
+                                <option value="s3" {{if eq .Settings.storage_type "s3"}}selected{{end}}>S3 兼容对象存储</option>
+                                <option value="webdav" {{if eq .Settings.storage_type "webdav"}}selected{{end}}>WebDAV</option>
+                                <option value="post" {{if eq .Settings.storage_type "post"}}selected{{end}}>POST 上传接口</option>
+                            </select>
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label fw-semibold">端点地址</label>
+                            <input name="storage_endpoint" class="form-control" value="{{.Settings.storage_endpoint}}" placeholder="s3: https://oss.example.com   |   webdav: https://dav.example.com/dav   |   post: https://upload.example.com/api" autocomplete="off">
+                            <div class="form-text">S3 为对象存储服务地址；WebDAV 为根目录地址；POST 为完整的上传接口 URL。</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">Bucket（S3）</label>
+                            <input name="storage_bucket" class="form-control" value="{{.Settings.storage_bucket}}" placeholder="my-bucket" autocomplete="off">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">Region（S3）</label>
+                            <input name="storage_region" class="form-control" value="{{.Settings.storage_region}}" placeholder="us-east-1" autocomplete="off">
+                            <div class="form-text">S3 签名所用区域（如 us-east-1 / ap-northeast-1 / oss-cn-hangzhou），默认 us-east-1。</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">用户名 / AccessKey</label>
+                            <input name="storage_username" class="form-control" value="{{.Settings.storage_username}}" placeholder="S3: AccessKey ID；WebDAV: 用户名；POST: 留空" autocomplete="off">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">密码 / SecretKey</label>
+                            <input name="storage_password" type="password" class="form-control" value="" autocomplete="new-password" placeholder="{{if .Settings.storage_password}}已配置（留空则不修改）{{else}}S3: SecretKey；WebDAV: 密码{{end}}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">远端路径前缀</label>
+                            <input name="storage_path_prefix" class="form-control" value="{{.Settings.storage_path_prefix}}" placeholder="images（可选）" autocomplete="off">
+                            <div class="form-text">上传到外部存储的目录前缀，如 images；留空则直接放在根下。POST 方式下额外作为 path 表单字段提交。</div>
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-    </div>
+        </section>
 
-    <div class="d-grid d-sm-flex gap-2 mb-4">
-        <button type="submit" class="btn btn-primary btn-lg px-5 btn-loading" data-loading-text="保存中...">
-            <span>保存全部设置</span>
-        </button>
-        <a href="/admin/settings" class="btn btn-outline-secondary btn-lg">放弃修改</a>
-    </div>
-</form>
+        <section class="settings-pane" data-pane="cleanup">
+            <div class="card app-card mb-4 fade-in-up">
+                <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">自动清理</h6></div>
+                <div class="card-body p-4">
+                    <p class="text-muted small mb-3">防止服务器磁盘被历史图片占满。启用后按以下两条规则自动清理：① 超过<strong>保留天数</strong>的旧记录会被清理；② 本地图片目录超过<strong>磁盘上限</strong>时按旧到新删除，直到低于上限。已上传外部存储的图片在清理时仅删除本地文件，保留记录与备用下载地址，用户可以继续访问。</p>
+                    <div class="row g-4">
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">启用自动清理</label>
+                            <select name="cleanup_enabled" class="form-select">
+                                <option value="true" {{if eq .Settings.cleanup_enabled "true"}}selected{{end}}>开启</option>
+                                <option value="false" {{if ne .Settings.cleanup_enabled "true"}}selected{{end}}>关闭</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">保留天数</label>
+                            <input name="cleanup_keep_days" type="number" min="1" class="form-control" value="{{if .Settings.cleanup_keep_days}}{{.Settings.cleanup_keep_days}}{{else}}30{{end}}" autocomplete="off">
+                            <div class="form-text">超过该天数的旧记录会被清理（默认 30 天）。</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">磁盘上限（MB）</label>
+                            <input name="cleanup_max_mb" type="number" min="1" class="form-control" value="{{if .Settings.cleanup_max_mb}}{{.Settings.cleanup_max_mb}}{{else}}2048{{end}}" autocomplete="off">
+                            <div class="form-text">data/images 目录超过该大小即触发按旧到新清理（默认 2048 MB）。</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="settings-pane" data-pane="about">
+            <div class="card app-card mb-4 fade-in-up">
+                <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">关于与更新</h6></div>
+                <div class="card-body p-4">
+                    {{if .AppVersion}}
+                    <div class="row g-4">
+                        <div class="col-md-5">
+                            <label class="form-label fw-semibold">当前版本</label>
+                            <div class="d-flex align-items-center gap-2 flex-wrap">
+                                <span class="fs-5 fw-bold">{{.AppVersion}}</span>
+                                <span class="badge text-bg-light" id="updVersionBadge"></span>
+                            </div>
+                            <div class="form-text">当前运行的平台版本号；打 v* 标签发布时由 CI 自动注入。</div>
+                        </div>
+                        <div class="col-md-7">
+                            <label class="form-label fw-semibold">在线更新</label>
+                            <div class="d-flex flex-wrap gap-2">
+                                <button type="button" class="btn btn-outline-primary" id="checkUpdateBtn">在线检测新版本</button>
+                                <button type="button" class="btn btn-primary" id="applyUpdateBtn" hidden>在线更新到新版本</button>
+                            </div>
+                            <div class="form-text">原生二进制部署（Windows / macOS / Linux）与<strong>容器部署</strong>均支持一键在线更新。容器内更新立即生效且容器不退出，但<strong>容器重建后会恢复镜像版本</strong>，持久升级请执行 <code>docker compose pull &amp;&amp; docker compose up -d</code>（也可用 Watchtower 全自动升级）。</div>
+                        </div>
+                    </div>
+                    <div id="updResult" hidden></div>
+                    {{else}}
+                    <p class="text-muted small mb-0">未注入版本号（当前为开发构建）。请在构建时通过 <code>-ldflags "-X main.AppVersion=vX.Y.Z"</code> 注入版本号。</p>
+                    {{end}}
+                </div>
+            </div>
+        </section>
+
+        <div class="settings-savebar">
+            <button type="submit" class="btn btn-primary btn-lg px-5 btn-loading" data-loading-text="保存中...">
+                <span>保存全部设置</span>
+            </button>
+            <a href="/admin/settings" class="btn btn-outline-secondary btn-lg">放弃修改</a>
+        </div>
+    </form>
+</div>
 
 <div id="ldoCallbackData" data-cb="{{.LdoDefaultCallback}}" hidden></div>
 <script>
 (function () {
-    var el = document.getElementById('ldoCallbackData');
-    if (!el) return;
-    var cb = el.dataset.cb || '';
-    var input = document.querySelector('input[name="linuxdo_redirect_uri"]');
-    var fillBtn = document.getElementById('ldoFillCallback');
-    var copyBtn = document.getElementById('ldoCopyCallback');
-    if (fillBtn && input && cb) {
-        fillBtn.addEventListener('click', function () {
-            input.value = cb;
-            input.focus();
+    /* ---------- 设置分类：左侧标签切换 ---------- */
+    var panes = Array.prototype.slice.call(document.querySelectorAll('.settings-pane'));
+    var navItems = Array.prototype.slice.call(document.querySelectorAll('.settings-nav-item'));
+    var valid = {};
+    panes.forEach(function (p) { valid[p.getAttribute('data-pane')] = p; });
+
+    function showPane(name) {
+        if (!valid[name]) name = 'basic';
+        panes.forEach(function (p) {
+            p.classList.toggle('active', p.getAttribute('data-pane') === name);
+        });
+        navItems.forEach(function (a) {
+            a.classList.toggle('active', a.getAttribute('data-pane') === name);
+        });
+        return name;
+    }
+    var initial = (location.hash || '').replace('#', '');
+    showPane(initial);
+    navItems.forEach(function (a) {
+        a.addEventListener('click', function (e) {
+            e.preventDefault();
+            var name = showPane(a.getAttribute('data-pane'));
+            try { history.replaceState(null, '', '#' + name); } catch (err) {}
+        });
+    });
+    window.addEventListener('hashchange', function () {
+        showPane((location.hash || '').replace('#', ''));
+    });
+
+    /* ---------- 关于与更新：在线检测 / 在线更新 ---------- */
+    var checkBtn = document.getElementById('checkUpdateBtn');
+    var applyBtn = document.getElementById('applyUpdateBtn');
+    var badge = document.getElementById('updVersionBadge');
+    var resultBox = document.getElementById('updResult');
+    var csrfEl = document.querySelector('input[name="_csrf"]');
+    var lastInContainer = false;
+    if (checkBtn && resultBox) {
+        var csrf = csrfEl ? csrfEl.value : '';
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        function showResult(html, extraClass) {
+            resultBox.hidden = false;
+            resultBox.className = 'mt-3 pt-3 border-top' + (extraClass ? ' ' + extraClass : '');
+            resultBox.innerHTML = html;
+        }
+        function failResult(msg) {
+            if (badge) badge.textContent = '检测失败';
+            if (applyBtn) applyBtn.hidden = true;
+            showResult('<div class="text-danger small">' + escapeHtml(msg) + '</div>');
+        }
+        checkBtn.addEventListener('click', function () {
+            checkBtn.disabled = true;
+            checkBtn.textContent = '检测中…';
+            showResult('<span class="text-muted small">正在连接 GitHub 查询最新版本…</span>');
+            fetch('/admin/check-update', { headers: { 'Accept': 'application/json' }, credentials: 'same-origin' })
+                .then(function (resp) { return resp.json(); })
+                .then(function (d) {
+                    checkBtn.disabled = false;
+                    checkBtn.textContent = '在线检测新版本';
+                    if (!d.ok || d.error) { failResult(d.error || '检测失败'); return; }
+                    lastInContainer = !!d.in_container;
+                    if (badge) {
+                        badge.textContent = d.upToDate ? '已是最新' : '发现新版本 ' + d.latest;
+                        badge.className = 'badge ' + (d.upToDate ? 'text-bg-light' : 'text-bg-primary text-bg-tint');
+                    }
+                    var html = '<div class="d-flex align-items-center gap-2 flex-wrap mb-2 small">' +
+                        '当前版本 <strong>' + escapeHtml(d.current) + '</strong> → 最新版本 <strong>' + escapeHtml(d.latest) + '</strong>' +
+                        '（<a href="' + escapeHtml(d.html_url) + '" target="_blank" rel="noopener">查看发布详情</a>）</div>';
+                    if (lastInContainer) {
+                        html += '<div class="alert alert-warning py-2 px-3 small mb-2">当前为<strong>容器部署</strong>：在线更新对运行中的容器立即生效、容器不退出；但容器重建后会恢复镜像版本，持久升级请执行 <code>docker compose pull</code>（或配置 Watchtower 全自动升级）。</div>';
+                    }
+                    if (d.upToDate) {
+                        html += '<div class="alert alert-success py-2 px-3 small mb-0">当前已是最新版本，无需更新。</div>';
+                        if (applyBtn) applyBtn.hidden = true;
+                    } else {
+                        if (d.name) html += '<div class="fw-semibold small mb-1">' + escapeHtml(d.name) + '</div>';
+                        if (d.notes) html += '<div class="small text-muted mb-2" style="max-height:180px;overflow:auto;white-space:pre-wrap;">' + escapeHtml(d.notes) + '</div>';
+                        if (d.hasAsset) {
+                            html += '<div class="text-muted small mb-2">将更新到安装包：<code>' + escapeHtml(d.assetName) + '</code></div>';
+                            if (applyBtn) { applyBtn.hidden = false; applyBtn.disabled = false; applyBtn.textContent = '在线更新到新版本'; }
+                        } else {
+                            html += '<div class="alert alert-warning py-2 px-3 small mb-0">当前平台暂无对应的安装包（' + escapeHtml(d.assetName) + '），请到 GitHub Releases 手动下载。</div>';
+                            if (applyBtn) applyBtn.hidden = true;
+                        }
+                    }
+                    showResult(html);
+                })
+                .catch(function () {
+                    checkBtn.disabled = false;
+                    checkBtn.textContent = '在线检测新版本';
+                    failResult('网络异常（无法访问 GitHub），请稍后重试。');
+                });
+        });
+        if (applyBtn) applyBtn.addEventListener('click', function () {
+            var tip = lastInContainer
+                ? '确定在线更新到最新版本吗？\n应用将下载安装包并在当前容器内原地重启（容器不退出）。\n注意：容器重建后会恢复镜像版本，持久升级请用 docker compose pull。'
+                : '确定在线更新到最新版本吗？\n应用将自动下载安装包并重启，期间服务会中断约 10~30 秒，请谨慎操作。';
+            if (!confirm(tip)) return;
+            applyBtn.disabled = true;
+            applyBtn.textContent = '更新中…';
+            var body = new URLSearchParams();
+            body.set('_csrf', csrf);
+            fetch('/admin/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: body.toString(),
+                credentials: 'same-origin'
+            })
+                .then(function (resp) { return resp.json(); })
+                .then(function (d) {
+                    if (!d.ok) {
+                        applyBtn.disabled = false;
+                        applyBtn.textContent = '重试更新';
+                        failResult(d.error || '更新失败');
+                        return;
+                    }
+                    applyBtn.textContent = '更新中…';
+                    showResult('<div class="alert alert-success py-2 px-3 small mb-0">' + escapeHtml(d.message) + '</div>');
+                    setTimeout(function () { location.reload(); }, 8000);
+                })
+                .catch(function () {
+                    applyBtn.disabled = false;
+                    applyBtn.textContent = '重试更新';
+                    failResult('网络异常，无法发起更新，请稍后重试。');
+                });
         });
     }
-    if (copyBtn && cb) {
-        copyBtn.addEventListener('click', function () {
-            var done = function (ok) {
-                copyBtn.textContent = ok ? '已复制' : '复制失败';
-                setTimeout(function () { copyBtn.textContent = '复制'; }, 1600);
-            };
-            if (navigator.clipboard && window.isSecureContext) {
-                navigator.clipboard.writeText(cb).then(function () { done(true); }, function () { done(false); });
-                return;
-            }
-            var ta = document.createElement('textarea');
-            ta.value = cb;
-            ta.style.position = 'fixed';
-            ta.style.opacity = '0';
-            document.body.appendChild(ta);
-            ta.select();
-            var ok = false;
-            try { ok = document.execCommand('copy'); } catch (e) {}
-            document.body.removeChild(ta);
-            done(ok);
-        });
+
+    /* ---------- Linux.do 回调地址：填入 / 复制 ---------- */
+    var el = document.getElementById('ldoCallbackData');
+    if (el) {
+        var cb = el.dataset.cb || '';
+        var input = document.querySelector('input[name="linuxdo_redirect_uri"]');
+        var fillBtn = document.getElementById('ldoFillCallback');
+        var copyBtn = document.getElementById('ldoCopyCallback');
+        if (fillBtn && input && cb) {
+            fillBtn.addEventListener('click', function () {
+                input.value = cb;
+                input.focus();
+            });
+        }
+        if (copyBtn && cb) {
+            copyBtn.addEventListener('click', function () {
+                var done = function (ok) {
+                    copyBtn.textContent = ok ? '已复制' : '复制失败';
+                    setTimeout(function () { copyBtn.textContent = '复制'; }, 1600);
+                };
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(cb).then(function () { done(true); }, function () { done(false); });
+                    return;
+                }
+                var ta = document.createElement('textarea');
+                ta.value = cb;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                var ok = false;
+                try { ok = document.execCommand('copy'); } catch (e) {}
+                document.body.removeChild(ta);
+                done(ok);
+            });
+        }
     }
 })();
 </script>

@@ -1,6 +1,10 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -11,13 +15,16 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +42,12 @@ import (
 var (
 	store = sessions.NewCookieStore(sessionKey())
 	tpl   *template.Template
+
+	// AppVersion 是当前程序版本号（vX.Y.Z）。打 v* 标签发布时由 CI
+	// 通过 -ldflags "-X main.AppVersion=..." 注入真实版本；本地构建
+	// 使用默认值 v1.0.0。设置页"关于与更新"中展示，并与 GitHub
+	// Releases 最新版比较实现在线检测/在线更新。
+	AppVersion = "v1.0.0"
 	// uploader 按后台"存储设置"构造的外部长期存储上传器（s3/webdav/post）；
 	// 未配置时为 nil，图片只存服务器本地。
 	// 注意：设置保存/重置（HTTP 请求线程）与生成 worker（后台线程）会并发
@@ -70,7 +83,11 @@ type genTask struct {
 // 视为不限制（默认按 1k/2k 提供选项）。
 // Models 为该渠道"可用模型"列表（创作界面按渠道展示、可切换）；未配置时
 // 默认提供 defaultModels 快捷选项。
+// ID 为该渠道的**稳定编号**：创建时分配、持久化保存，之后渠道增删或调整
+// 顺序都不会改变已有编号。网页创作与 API 的 channel 参数均按此编号引用
+// 渠道（而不是数组下标），避免渠道列表变动导致调用方选错渠道。
 type GenerationEndpoint struct {
+	ID          int      `json:"id"`
 	Name        string   `json:"name"`
 	APIURL      string   `json:"api_url"`
 	APIKey      string   `json:"api_key"`
@@ -336,6 +353,8 @@ func main() {
 	if err := models.InitDB("data/creation.db"); err != nil {
 		log.Fatal("DB init:", err)
 	}
+	// 为历史配置中缺失编号的渠道补发稳定编号（幂等迁移）
+	migrateEndpointIDs()
 
 	tpl = template.Must(template.New("").Funcs(template.FuncMap{
 		"comma": commaFormat,
@@ -410,6 +429,8 @@ func main() {
 	http.HandleFunc("/admin/settings", authMiddleware(adminMiddleware(adminSettingsHandler)))
 	http.HandleFunc("/admin/update-settings", authMiddleware(adminMiddleware(adminUpdateSettingsHandler)))
 	http.HandleFunc("/admin/reset-settings", authMiddleware(adminMiddleware(adminResetSettingsHandler)))
+	http.HandleFunc("/admin/check-update", authMiddleware(adminMiddleware(adminCheckUpdateHandler)))
+	http.HandleFunc("/admin/update", authMiddleware(adminMiddleware(adminUpdateHandler)))
 	http.HandleFunc("/admin", authMiddleware(adminMiddleware(adminDashboardHandler)))
 	http.HandleFunc("/admin/backup", authMiddleware(adminMiddleware(adminBackupHandler)))
 	http.HandleFunc("/health", healthHandler)
@@ -419,6 +440,7 @@ func main() {
 	http.HandleFunc("/api/key/generate", authMiddleware(apiKeyGenerateHandler))
 	http.HandleFunc("/api/v1/generate", apiAuthMiddleware(apiGenerateHandler))
 	http.HandleFunc("/api/v1/status", apiAuthMiddleware(apiStatusHandler))
+	http.HandleFunc("/api/v1/channels", apiAuthMiddleware(apiChannelsHandler))
 	http.HandleFunc("/api/docs", apiDocsHandler)
 
 	addr := os.Getenv("PORT")
@@ -1423,14 +1445,20 @@ func createPage(w http.ResponseWriter, r *http.Request, extra map[string]interfa
 			}
 		}
 	}
-	// 渠道下拉：展示全部渠道（渠道名，NSFW 渠道带标注）；
-	// 默认选中第一个渠道，上次选择（会话内）仍有效时沿用
+	// 渠道下拉：展示全部渠道（"编号 · 渠道名"，NSFW 渠道带标注）；
+	// 默认选中第一个渠道，上次选择（会话内记录的是渠道稳定编号）仍有效时沿用
 	defIdx := -1
 	lastChannel, _ := data["LastChannel"].(string)
 	eps := loadEndpoints()
-	if idx, err := strconv.Atoi(lastChannel); err == nil && idx >= 0 && idx < len(eps) {
-		defIdx = idx
-	} else if len(eps) > 0 {
+	if id, err := strconv.Atoi(lastChannel); err == nil {
+		for i, ep := range eps {
+			if ep.ID == id {
+				defIdx = i
+				break
+			}
+		}
+	}
+	if defIdx < 0 && len(eps) > 0 {
 		defIdx = 0
 	}
 	data["Channels"] = allChannels()
@@ -1703,6 +1731,10 @@ func loadEndpoints() []GenerationEndpoint {
 						valid[i].Models = append([]string(nil), defaultModels...)
 					}
 				}
+				// 稳定编号兜底：配置中缺失 id 的历史数据在内存中按顺序补发
+				// （正式环境的持久化补发在启动时由 migrateEndpointIDs 完成；
+				// 这里仅为保证任何入口读取到的渠道都有编号可用）。
+				fillEndpointIDs(valid)
 				return valid
 			}
 		}
@@ -1711,6 +1743,7 @@ func loadEndpoints() []GenerationEndpoint {
 	apiKey, _ := models.GetConfig("generation_api_key")
 	if apiURL != "" && apiKey != "" {
 		return []GenerationEndpoint{{
+			ID:     1,
 			Name:   "默认渠道",
 			APIURL: apiURL,
 			APIKey: apiKey,
@@ -1718,6 +1751,67 @@ func loadEndpoints() []GenerationEndpoint {
 		}}
 	}
 	return nil
+}
+
+// fillEndpointIDs 为切片中缺失编号（ID<=0）的渠道补发稳定编号：
+// 在已有最大编号基础上递增分配（1 开始，编号不复用）。
+func fillEndpointIDs(eps []GenerationEndpoint) {
+	maxID := 0
+	for _, ep := range eps {
+		if ep.ID > maxID {
+			maxID = ep.ID
+		}
+	}
+	for i := range eps {
+		if eps[i].ID <= 0 {
+			maxID++
+			eps[i].ID = maxID
+		}
+	}
+}
+
+// migrateEndpointIDs 启动时执行一次：为历史配置中缺失编号的渠道
+// 补发稳定编号并持久化，此后渠道编号不再随增删/调整顺序变化；
+// 同时把编号计数器 endpoints_max_id 抬升到当前最大值（保证后续
+// 新渠道分配到的编号不会与现有渠道冲突）。
+func migrateEndpointIDs() {
+	raw, _ := models.GetConfig("generation_endpoints")
+	if raw == "" {
+		return
+	}
+	var eps []GenerationEndpoint
+	if err := json.Unmarshal([]byte(raw), &eps); err != nil {
+		return
+	}
+	missing := 0
+	for _, ep := range eps {
+		if ep.ID <= 0 {
+			missing++
+		}
+	}
+	changed := false
+	if missing > 0 {
+		fillEndpointIDs(eps)
+		changed = true
+	}
+	maxID := 0
+	for _, ep := range eps {
+		if ep.ID > maxID {
+			maxID = ep.ID
+		}
+	}
+	if counter := atoiDefault(models.GetConfigOr("endpoints_max_id", "0"), 0); maxID > counter {
+		changed = true
+	}
+	if changed {
+		if b, err := json.Marshal(eps); err == nil {
+			models.SetConfig("generation_endpoints", string(b))
+			models.SetConfig("endpoints_max_id", strconv.Itoa(maxID))
+			if missing > 0 {
+				log.Printf("endpoints: backfilled %d stable channel id(s)", missing)
+			}
+		}
+	}
 }
 
 // selectEndpoint 选择本次请求使用的渠道：NSFW 请求必须走标记为 NSFW 的渠道，
@@ -1738,8 +1832,11 @@ func selectEndpoint(nsfw bool) (GenerationEndpoint, error) {
 	return GenerationEndpoint{}, errors.New("未配置普通生成渠道，请在系统设置中添加")
 }
 
-// channelOption 是创作界面渠道下拉的一个选项（引用全局渠道下标）。
+// channelOption 是创作界面渠道下拉的一个选项。ID 为渠道稳定编号
+// （表单提交值 / API channel 参数取值）；Idx 为列表中的位置（仅用于
+// 模板比较默认选中项）。
 type channelOption struct {
+	ID             int
 	Idx            int
 	Name           string
 	NSFW           bool
@@ -1772,7 +1869,7 @@ func allChannels() []channelOption {
 			ms = append([]string(nil), defaultModels...)
 		}
 		opts = append(opts, channelOption{
-			Idx: i, Name: name, NSFW: ep.NSFW, NSFWStr: nsfwStr,
+			ID: ep.ID, Idx: i, Name: name, NSFW: ep.NSFW, NSFWStr: nsfwStr,
 			Resolutions: res, ResolutionsCSV: strings.Join(res, ","),
 			Models: ms, ModelsCSV: strings.Join(ms, ","),
 		})
@@ -1780,15 +1877,34 @@ func allChannels() []channelOption {
 	return opts
 }
 
-// resolveChannel 按表单提交的渠道全局下标解析所选渠道；
-// 渠道是否为 NSFW 由渠道自身配置决定。
+// resolveChannel 按"渠道稳定编号"解析所选渠道：编号在渠道创建时分配并
+// 持久化（见 GenerationEndpoint.ID），不随渠道增删/调整顺序变化（获取方式：
+// 创作页渠道下拉的"编号 · 渠道名"，或 GET /api/v1/channels 的 id 字段）。
+// 留空 = 自动选第一个普通渠道（与 API 文档约定一致）；没有普通渠道时
+// 兜底取第一个。渠道是否为 NSFW 由渠道自身配置决定。
 func resolveChannel(channelStr string) (GenerationEndpoint, error) {
 	eps := loadEndpoints()
-	idx, err := strconv.Atoi(strings.TrimSpace(channelStr))
-	if err != nil || idx < 0 || idx >= len(eps) {
-		return GenerationEndpoint{}, errors.New("请选择有效的生成渠道")
+	if len(eps) == 0 {
+		return GenerationEndpoint{}, errors.New("图片生成服务未配置，请联系管理员")
 	}
-	return eps[idx], nil
+	channelStr = strings.TrimSpace(channelStr)
+	if channelStr == "" {
+		for _, ep := range eps {
+			if !ep.NSFW {
+				return ep, nil
+			}
+		}
+		return eps[0], nil // 全部为 NSFW 渠道时兜底取第一个
+	}
+	id, err := strconv.Atoi(channelStr)
+	if err == nil {
+		for _, ep := range eps {
+			if ep.ID == id {
+				return ep, nil
+			}
+		}
+	}
+	return GenerationEndpoint{}, errors.New("渠道编号无效：请在创作页渠道下拉中选择，或调用 GET /api/v1/channels 查询渠道编号")
 }
 
 // containsString 判断字符串切片中是否存在指定值。
@@ -2348,8 +2464,16 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		rec["AltURLs"] = altMap[rec["ID"].(int64)]
 	}
+	// 累计消耗只统计成功/进行中的记录：失败任务的扣费已退回（见
+	// markTaskFailed），若一并计入会让"累计消耗"虚高。搜索过滤保持一致。
 	var totalCost int64
-	models.DB.QueryRow("SELECT COALESCE(SUM(cost_points),0) FROM generation_records "+base, args...).Scan(&totalCost)
+	costArgs := append([]interface{}{}, userID)
+	costSQL := "SELECT COALESCE(SUM(cost_points),0) FROM generation_records WHERE user_id=? AND status != 'failed'"
+	if q != "" {
+		costSQL += " AND prompt LIKE ? ESCAPE '\\'"
+		costArgs = append(costArgs, "%"+likeEscape(q)+"%")
+	}
+	models.DB.QueryRow(costSQL, costArgs...).Scan(&totalCost)
 	pageBase := "/records?"
 	if q != "" {
 		pageBase += "q=" + url.QueryEscape(q) + "&"
@@ -3111,6 +3235,7 @@ func adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		"Endpoints":          loadEndpoints(),
 		"LdoCallback":        linuxdoCallbackURL(r),
 		"LdoDefaultCallback": linuxdoRequestCallback(r),
+		"AppVersion":         AppVersion,
 		"Content":            "content-settings",
 	})
 }
@@ -3178,10 +3303,542 @@ func adminUpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	flashRedirect(w, r, "/admin/settings", "设置已保存")
 }
 
+// ---------- 在线检测新版本 & 在线更新 ----------
+// 版本发布源：GitHub Releases（构建与发布流程见 .github/workflows/build-binaries.yml
+// 与 docs/release.md）。检测/更新面向原生二进制部署；容器部署走 docker compose pull。
+const (
+	updateRepo    = "yhw5231/online-creation-platform"
+	updateAPIBase = "https://api.github.com/repos/" + updateRepo + "/releases"
+	updateMaxSize = 300 << 20 // 安装包体积上限 300MB，防止异常文件拖垮磁盘
+)
+
+// updateRelease 是 GitHub Releases API（/releases/latest）响应的子集。
+type updateRelease struct {
+	TagName string `json:"tag_name"`
+	Name    string `json:"name"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+// fetchLatestRelease 查询 GitHub 上最新的正式发布版本。
+func fetchLatestRelease() (*updateRelease, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, updateAPIBase+"/latest", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "online-creation-platform-updater")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			return nil, errors.New("GitHub API 请求过于频繁（每小时 60 次限额），请稍后再试")
+		}
+		return nil, fmt.Errorf("GitHub API 返回状态 %d", resp.StatusCode)
+	}
+	var rel updateRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return nil, err
+	}
+	if rel.TagName == "" {
+		return nil, errors.New("仓库暂无正式发布版本")
+	}
+	return &rel, nil
+}
+
+// updateAssetName 返回当前平台对应的发布安装包文件名；不支持的平台返回空串。
+func updateAssetName(goos, goarch string) string {
+	switch goos + "/" + goarch {
+	case "windows/amd64":
+		return "online-creation-windows-amd64.zip"
+	case "windows/arm64":
+		return "online-creation-windows-arm64.zip"
+	case "darwin/amd64":
+		return "online-creation-darwin-amd64.tar.gz"
+	case "darwin/arm64":
+		return "online-creation-darwin-arm64.tar.gz"
+	case "linux/amd64":
+		return "online-creation-linux-amd64.tar.gz"
+	case "linux/arm64":
+		return "online-creation-linux-arm64.tar.gz"
+	}
+	return ""
+}
+
+// parseVersion 把 vX.Y.Z[-prerelease] 解析为三段数字，便于逐段比较。
+func parseVersion(s string) [3]int {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimPrefix(s, "v")
+	if i := strings.IndexByte(s, '-'); i >= 0 {
+		s = s[:i]
+	}
+	var v [3]int
+	for i, part := range strings.SplitN(s, ".", 3) {
+		if i >= 3 {
+			break
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && n >= 0 {
+			v[i] = n
+		}
+	}
+	return v
+}
+
+// compareVersions 按三段版本号比较：a<b 返回 -1，a>b 返回 1，相等返回 0。
+func compareVersions(a, b string) int {
+	va, vb := parseVersion(a), parseVersion(b)
+	for i := 0; i < 3; i++ {
+		if va[i] < vb[i] {
+			return -1
+		}
+		if va[i] > vb[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+// adminCheckUpdateHandler 返回当前版本与 GitHub 最新版的对比结果（JSON），
+// 供设置页"关于与更新"在线检测使用。
+func adminCheckUpdateHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	rel, err := fetchLatestRelease()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "检测失败：" + err.Error()})
+		return
+	}
+	cur := strings.TrimPrefix(AppVersion, "v")
+	latest := strings.TrimPrefix(rel.TagName, "v")
+	assetName := updateAssetName(runtime.GOOS, runtime.GOARCH)
+	hasAsset := false
+	for _, a := range rel.Assets {
+		if a.Name == assetName {
+			hasAsset = true
+			break
+		}
+	}
+	notes := strings.TrimSpace(rel.Body)
+	if runes := []rune(notes); len(runes) > 3000 {
+		notes = string(runes[:3000]) + "…"
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":           true,
+		"current":      AppVersion,
+		"latest":       rel.TagName,
+		"name":         rel.Name,
+		"notes":        notes,
+		"html_url":     rel.HTMLURL,
+		"upToDate":     compareVersions(cur, latest) >= 0,
+		"hasAsset":     hasAsset,
+		"assetName":    assetName,
+		"in_container": inContainer(),
+	})
+}
+
+// inContainer 检测当前是否运行在容器中（Docker 等）。
+// 判断依据：/.dockerenv 存在（Docker 默认创建），或 cgroup 里出现
+// docker/containerd 标识（部分无 /.dockerenv 的运行时兜底）。
+func inContainer() bool {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	if b, err := os.ReadFile("/proc/1/cgroup"); err == nil {
+		if bytes.Contains(b, []byte("docker")) || bytes.Contains(b, []byte("containerd")) {
+			return true
+		}
+	}
+	return false
+}
+
+// adminUpdateHandler 执行在线更新：下载最新版安装包 → 解压 → 生成重启脚本
+// → 后台执行（先等 HTTP 响应返回，再结束旧进程、替换文件、拉起新进程）。
+func adminUpdateHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "请求方式错误"})
+		return
+	}
+	if !verifyCSRF(r) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "表单已过期，请刷新页面后重试"})
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "表单解析失败"})
+		return
+	}
+	rel, err := fetchLatestRelease()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "获取新版本失败：" + err.Error()})
+		return
+	}
+	// 已在最新版则不再重复更新（按版本号判断，防止重复执行）
+	if compareVersions(strings.TrimPrefix(AppVersion, "v"), strings.TrimPrefix(rel.TagName, "v")) >= 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "当前已是最新版本，无需更新"})
+		return
+	}
+	assetName := updateAssetName(runtime.GOOS, runtime.GOARCH)
+	if assetName == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "当前平台暂不支持在线更新，请到 GitHub Releases 下载安装包"})
+		return
+	}
+	assetURL := ""
+	for _, a := range rel.Assets {
+		if a.Name == assetName {
+			assetURL = a.BrowserDownloadURL
+			break
+		}
+	}
+	if assetURL == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "最新发布中未找到当前平台的安装包 " + assetName + "，请到 GitHub Releases 手动下载"})
+		return
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "无法定位当前程序文件，无法在线更新"})
+		return
+	}
+	appDir := filepath.Dir(exePath)
+	updDir := filepath.Join(appDir, "data", "update")
+	if err := os.MkdirAll(filepath.Join(updDir, "new"), 0o755); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "无法创建更新目录：" + err.Error()})
+		return
+	}
+	archivePath := filepath.Join(updDir, assetName)
+	if err := downloadFile(assetURL, archivePath); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "下载安装包失败：" + err.Error()})
+		return
+	}
+	if err := extractArchive(archivePath, filepath.Join(updDir, "new")); err != nil {
+		os.Remove(archivePath)
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "解压安装包失败：" + err.Error()})
+		return
+	}
+	os.Remove(archivePath)
+	// 定位新可执行文件：安装包内统一命名为 app / app.exe
+	exeName := filepath.Base(exePath)
+	newExe := filepath.Join(updDir, "new", "app")
+	if runtime.GOOS == "windows" {
+		newExe = filepath.Join(updDir, "new", "app.exe")
+	}
+	if fi, err := os.Stat(newExe); err != nil || fi.Size() < 1024*1024 {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "安装包内未找到可执行程序，已取消更新，正在回滚临时文件"})
+		os.RemoveAll(updDir)
+		return
+	}
+	// 换名跟随当前程序名（如容器内叫 main，更新后依旧叫 main）
+	if exeName != "app" && exeName != "app.exe" {
+		targetInNew := filepath.Join(updDir, "new", exeName)
+		if err := os.Rename(newExe, targetInNew); err == nil {
+			newExe = targetInNew
+		}
+	}
+	if _, err := os.Stat(filepath.Join(updDir, "new", "templates")); err != nil {
+		os.RemoveAll(updDir)
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "安装包缺少 templates 目录，已取消更新"})
+		return
+	}
+	// Windows 可执行文件运行中不可覆盖：走后台脚本（等 3 秒 →
+	// 结束旧进程 → 替换文件 → 拉起新进程）。
+	if runtime.GOOS == "windows" {
+		scriptPath, err := writeUpdateScript(updDir, appDir, exeName, newExe, os.Getpid())
+		if err != nil {
+			os.RemoveAll(updDir)
+			json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "创建更新脚本失败：" + err.Error()})
+			return
+		}
+		launchDetached(scriptPath)
+		log.Printf("update: preparing self-update to %s (asset %s, new exe %s)", rel.TagName, assetName, newExe)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"message": "已开始在线更新到 " + rel.TagName + "。应用将自动退出并重启（约 10~30 秒），请稍后刷新页面。",
+		})
+		return
+	}
+	// Linux/macOS（含容器部署）：原地替换文件后用新二进制替换进程映像。
+	// 容器中应用进程是 PID 1（entrypoint.sh 以 exec 启动），映像替换后
+	// 容器不会退出、无需重建，更新立即生效。
+	log.Printf("update: applying self-update to %s (asset %s, new exe %s)", rel.TagName, assetName, newExe)
+	applyExecUpdate(w, appDir, exePath, newExe, updDir, rel.TagName, inContainer())
+}
+
+// applyExecUpdate 执行"原地替换 + 进程映像替换"式更新（Linux/macOS）：
+// 原子替换二进制 → 递归同步 templates/static → 返回响应后延迟 1.5 秒
+// exec 新二进制（保证 HTTP 响应先送达浏览器）。exec 前关闭数据库，
+// 释放 SQLite 文件句柄与锁，让新进程干净地重新初始化。
+func applyExecUpdate(w http.ResponseWriter, appDir, exePath, newExe, updDir, newVersion string, container bool) {
+	fail := func(msg string) {
+		os.RemoveAll(updDir)
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": msg})
+	}
+	// 1) 原子替换二进制：先改名到同目录临时名，再覆盖目标
+	// （Linux 上 rename 覆盖正在运行的二进制文件是合法的）
+	tmpBin := exePath + ".new"
+	if err := os.Rename(newExe, tmpBin); err != nil {
+		fail("替换可执行文件失败：" + err.Error())
+		return
+	}
+	if err := os.Rename(tmpBin, exePath); err != nil {
+		os.Remove(tmpBin)
+		fail("替换可执行文件失败：" + err.Error())
+		return
+	}
+	// 2) 递归同步 templates / static（覆盖同名文件，新增文件补齐）
+	if err := copyDirReplace(filepath.Join(updDir, "new", "templates"), filepath.Join(appDir, "templates")); err != nil {
+		fail("同步模板失败：" + err.Error())
+		return
+	}
+	if _, err := os.Stat(filepath.Join(updDir, "new", "static")); err == nil {
+		if err := copyDirReplace(filepath.Join(updDir, "new", "static"), filepath.Join(appDir, "static")); err != nil {
+			fail("同步静态资源失败：" + err.Error())
+			return
+		}
+	}
+	msg := "已开始在线更新到 " + newVersion + "。应用正在原地重启（容器不退出），请稍后刷新页面。"
+	if container {
+		msg = "已开始在线更新到 " + newVersion + "。正在原地重启当前容器（容器不会退出）。注意：容器重建后会恢复镜像版本，持久升级请执行 docker compose pull。"
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "message": msg})
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		os.RemoveAll(updDir)
+		// 释放 SQLite 句柄/锁，避免 exec 后新进程读写冲突
+		if models.DB != nil {
+			models.DB.Close()
+		}
+		if err := execSelf(exePath, os.Args, os.Environ()); err != nil {
+			log.Printf("update: exec new binary failed (files already replaced, restart manually): %v", err)
+		}
+	}()
+}
+
+// copyDirReplace 递归把 src 目录拷贝到 dst，覆盖同名文件、补齐新文件。
+func copyDirReplace(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil // 安装包内不应有符号链接，跳过
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			in.Close()
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+		if err != nil {
+			in.Close()
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			in.Close()
+			out.Close()
+			return err
+		}
+		if err := in.Close(); err != nil {
+			out.Close()
+			return err
+		}
+		return out.Close()
+	})
+}
+
+// downloadFile 把 URL 下载到 path（体积受 updateMaxSize 限制）。
+func downloadFile(url, path string) error {
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("下载返回状态 %d", resp.StatusCode)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, updateMaxSize+1)); err != nil {
+		return err
+	}
+	if fi, err := f.Stat(); err != nil || fi.Size() > updateMaxSize {
+		return errors.New("安装包体积异常（超过 300MB）")
+	}
+	return nil
+}
+
+// withinDir 校验 target 是否位于 dir 之内（防 zip-slip 路径穿越）。
+func withinDir(dir, target string) bool {
+	rel, err := filepath.Rel(dir, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel))
+}
+
+// extractArchive 解压 zip / tar.gz 安装包到 dest，所有条目做路径穿越校验。
+func extractArchive(archivePath, dest string) error {
+	lower := strings.ToLower(archivePath)
+	if strings.HasSuffix(lower, ".zip") {
+		zr, err := zip.OpenReader(archivePath)
+		if err != nil {
+			return err
+		}
+		defer zr.Close()
+		for _, f := range zr.File {
+			target := filepath.Join(dest, f.Name)
+			if !withinDir(dest, target) {
+				return errors.New("安装包包含非法路径：" + f.Name)
+			}
+			if f.FileInfo().IsDir() {
+				if err := os.MkdirAll(target, 0o755); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			src, err := f.Open()
+			if err != nil {
+				return err
+			}
+			dst, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode().Perm()|0o600)
+			if err != nil {
+				src.Close()
+				return err
+			}
+			if _, err := io.Copy(dst, src); err != nil {
+				dst.Close()
+				src.Close()
+				return err
+			}
+			dst.Close()
+			src.Close()
+		}
+		return nil
+	}
+	fr, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer fr.Close()
+	gz, err := gzip.NewReader(fr)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dest, hdr.Name)
+		if !withinDir(dest, target) {
+			return errors.New("安装包包含非法路径：" + hdr.Name)
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			dst, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode)|0o600)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(dst, tr); err != nil {
+				dst.Close()
+				return err
+			}
+			dst.Close()
+		}
+	}
+	return nil
+}
+
+// writeUpdateScript 生成后台更新脚本：等 3 秒让 HTTP 响应返回 → 结束旧进程
+// → 替换可执行文件、模板与静态资源 → 重新拉起程序。
+func writeUpdateScript(updDir, appDir, exeName, newExe string, pid int) (string, error) {
+	if runtime.GOOS == "windows" {
+		script := filepath.Join(updDir, "do-update.cmd")
+		src := "@echo off\r\n" +
+			"chcp 65001 >nul\r\n" +
+			"timeout /t 3 /nobreak >nul\r\n" +
+			"taskkill /F /PID " + strconv.Itoa(pid) + " >nul 2>&1\r\n" +
+			"timeout /t 1 /nobreak >nul\r\n" +
+			"copy /Y \"" + newExe + "\" \"" + filepath.Join(appDir, exeName) + "\" >nul\r\n" +
+			"xcopy /E /Y /I \"" + filepath.Join(updDir, "new", "templates") + "\" \"" + filepath.Join(appDir, "templates") + "\" >nul\r\n" +
+			"xcopy /E /Y /I \"" + filepath.Join(updDir, "new", "static") + "\" \"" + filepath.Join(appDir, "static") + "\" >nul\r\n" +
+			"rd /S /Q \"" + filepath.Join(updDir, "new") + "\" >nul 2>&1\r\n" +
+			"start \"\" \"" + filepath.Join(appDir, exeName) + "\"\r\n"
+		if err := os.WriteFile(script, []byte(src), 0o755); err != nil {
+			return "", err
+		}
+		return script, nil
+	}
+	script := filepath.Join(updDir, "do-update.sh")
+	src := "#!/bin/sh\n" +
+		"APP_DIR=\"$(dirname \"$0\")/../..\"\n" +
+		"sleep 3\n" +
+		"kill -TERM " + strconv.Itoa(pid) + " 2>/dev/null\n" +
+		"sleep 1\n" +
+		"cp -f \"" + newExe + "\" \"" + filepath.Join(appDir, exeName) + "\"\n" +
+		"cp -rf \"$(dirname \"$0\")/new/templates/.\" \"" + filepath.Join(appDir, "templates") + "\"\n" +
+		"cp -rf \"$(dirname \"$0\")/new/static/.\" \"" + filepath.Join(appDir, "static") + "\"\n" +
+		"cd \"$APP_DIR\"\n" +
+		"nohup ./" + exeName + " > server.out.log 2>&1 &\n" +
+		"rm -rf \"$(dirname \"$0\")/new\"\n"
+	if err := os.WriteFile(script, []byte(src), 0o755); err != nil {
+		return "", err
+	}
+	return script, nil
+}
+
+// launchDetached 脱离当前进程后台执行更新脚本（脚本内部先等待 3 秒，
+// 确保本 HTTP 响应已送达浏览器）。
+func launchDetached(path string) {
+	if runtime.GOOS == "windows" {
+		exec.Command("cmd", "/c", "start", "", "/b", path).Start()
+		return
+	}
+	exec.Command("/bin/sh", "-c", "nohup '"+path+"' >/dev/null 2>&1 &").Start()
+}
+
 // saveEndpointsFromForm 把设置表单中的 ep_*[] 系列字段解析为渠道列表存入
 // generation_endpoints（JSON），并同步回写旧的 generation_api_url/key/model
 // （取第一个普通渠道）以保持向后兼容。API Key 留空表示沿用已保存的密钥
 // （按 API 地址匹配旧配置）；地址为空的行直接被丢弃。
+// 渠道编号（ep_id[]）：表单回显的已有编号原样保留（稳定编号，不随增删/排序
+// 变化）；新行编号为空，在持久化计数器 endpoints_max_id 基础上 +1 分配，
+// 删除渠道也不会复用旧编号（避免调用方的旧 channel 参数静默落到别的渠道）。
 func saveEndpointsFromForm(r *http.Request) {
 	// 表单字段名带 [] 后缀（如 ep_url[]），Go 解析后 key 原样保留括号
 	urls := r.Form["ep_url[]"]
@@ -3192,18 +3849,37 @@ func saveEndpointsFromForm(r *http.Request) {
 	epRes := r.Form["ep_res[]"]
 	availModels := r.Form["ep_models[]"]
 	extraModels := r.Form["ep_extra_models[]"]
+	epIDs := r.Form["ep_id[]"]
 	oldByURL := map[string]string{}
+	// 编号计数器：持久化记录已分配的最大编号，删除渠道也不回退
+	maxID := atoiDefault(models.GetConfigOr("endpoints_max_id", "0"), 0)
 	for _, ep := range loadEndpoints() {
 		if ep.APIKey != "" {
 			oldByURL[strings.TrimSpace(ep.APIURL)] = ep.APIKey
 		}
+		if ep.ID > maxID {
+			maxID = ep.ID // 配置被手工编辑过则以现有编号为基准
+		}
 	}
+	usedIDs := map[int]bool{}
 	eps := []GenerationEndpoint{}
 	for i, u := range urls {
 		url := strings.TrimSpace(u)
 		if url == "" {
 			continue // 未填地址的行视为待删除占位行
 		}
+		// 稳定编号：回显编号保留；缺失/非法/重复的给新编号（max+1，不复用）
+		id := 0
+		if i < len(epIDs) {
+			if n, err := strconv.Atoi(strings.TrimSpace(epIDs[i])); err == nil && n > 0 && !usedIDs[n] {
+				id = n
+			}
+		}
+		if id == 0 {
+			maxID++
+			id = maxID
+		}
+		usedIDs[id] = true
 		name := ""
 		if i < len(names) {
 			name = strings.TrimSpace(names[i])
@@ -3268,7 +3944,7 @@ func saveEndpointsFromForm(r *http.Request) {
 		if len(ms) == 0 {
 			ms = append([]string(nil), defaultModels...)
 		}
-		eps = append(eps, GenerationEndpoint{Name: name, APIURL: url, APIKey: key, Model: m, Models: ms, NSFW: nsfw, Resolutions: resolutions})
+		eps = append(eps, GenerationEndpoint{ID: id, Name: name, APIURL: url, APIKey: key, Model: m, Models: ms, NSFW: nsfw, Resolutions: resolutions})
 	}
 	if len(eps) == 0 {
 		// 全部删除：清空多渠道与旧字段，停用生成服务
@@ -3280,6 +3956,7 @@ func saveEndpointsFromForm(r *http.Request) {
 	}
 	raw, _ := json.Marshal(eps)
 	models.SetConfig("generation_endpoints", string(raw))
+	models.SetConfig("endpoints_max_id", strconv.Itoa(maxID))
 	// 兼容旧字段：普通渠道取第一个非 NSFW
 	for _, ep := range eps {
 		if !ep.NSFW {
@@ -4350,6 +5027,46 @@ func apiKeyGenerateHandler(w http.ResponseWriter, r *http.Request) {
 	sess.Values["new_api_key"] = key
 	sess.Save(r, w)
 	flashRedirect(w, r, "/profile", "新 API Key 已生成，请立即复制保存（仅显示一次）")
+}
+
+// ------------------------- 渠道列表查询 -------------------------
+// GET /api/v1/channels：返回当前配置的全部生成渠道与各自的**稳定编号**
+// （id 即生成接口 channel 参数的取值）。编号在渠道创建时分配并持久化，
+// 不随渠道增删/调整顺序变化；index 仅为当前列表的展示顺序，请勿用作
+// channel 参数。调用方凭 API Key 鉴权。
+func apiChannelsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"ok":false,"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	eps := loadEndpoints()
+	type chanInfo struct {
+		ID          int      `json:"id"`
+		Index       int      `json:"index"`
+		Name        string   `json:"name"`
+		NSFW        bool     `json:"nsfw"`
+		Model       string   `json:"model"`
+		Resolutions []string `json:"resolutions"`
+		Models      []string `json:"models"`
+	}
+	list := []chanInfo{}
+	for i, ep := range eps {
+		list = append(list, chanInfo{
+			ID:          ep.ID,
+			Index:       i,
+			Name:        ep.Name,
+			NSFW:        ep.NSFW,
+			Model:       ep.Model,
+			Resolutions: ep.Resolutions,
+			Models:      ep.Models,
+		})
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":       true,
+		"channels": list,
+		"hint":     "channel 参数填写渠道编号（id 字段，字符串，从 1 开始）；编号为渠道创建时分配，不随增删/排序变化。留空自动选第一个普通渠道",
+	})
 }
 
 // ------------------------- API 生成接口（积分扣减与网页一致） -------------------------

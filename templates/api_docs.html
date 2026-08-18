@@ -30,7 +30,7 @@ X-API-Key: sk-xxxxxxxx</pre>
                     <thead><tr><th class="w-25">参数</th><th class="w-10">必填</th><th>说明</th></tr></thead>
                     <tbody>
                         <tr><td><code>prompt</code></td><td>是</td><td>提示词，最长 4000 字</td></tr>
-                        <tr><td><code>channel</code></td><td>否</td><td>渠道下标<strong>字符串</strong>（0 开始，如 <code>"0"</code>），留空自动选第一个普通渠道</td></tr>
+                        <tr><td><code>channel</code></td><td>否</td><td>渠道<strong>稳定编号</strong>（字符串，如 <code>"1"</code>），留空自动选第一个普通渠道。编号在渠道创建时分配、不随渠道增删/排序变化；可在<strong>创作页面「生成渠道」下拉</strong>看到（编号 · 渠道名），或调用 <code>GET /api/v1/channels</code> 查询</td></tr>
                         <tr><td><code>n</code></td><td>否</td><td>生成数量，1–4，默认 1</td></tr>
                         <tr><td><code>aspect_ratio</code></td><td>否</td><td>1:1 / 16:9 / 4:3 / 3:4 / 9:16 / 21:9，默认 1:1</td></tr>
                         <tr><td><code>resolution</code></td><td>否</td><td>分辨率档位（如 1k/2k/4k），须为该渠道支持的档位，默认取渠道第一个档位；渠道不支持时返回 400</td></tr>
@@ -60,7 +60,42 @@ X-API-Key: sk-xxxxxxxx</pre>
                 </ul>
 
                 <hr>
-                <h6 class="fw-bold">5. curl 完整示例</h6>
+                <h6 class="fw-bold">5. 查询可用渠道</h6>
+                <p class="small mb-1"><code>GET /api/v1/channels</code>（需要 API Key，返回当前配置的全部生成渠道与各自的<strong>稳定编号</strong>）</p>
+                <pre class="bg-light p-3 rounded small mb-2">{
+  "ok": true,
+  "channels": [
+    {
+      "id": 1,
+      "index": 0,
+      "name": "主渠道",
+      "nsfw": false,
+      "model": "grok-imagine-image-lite",
+      "resolutions": ["1k", "2k"],
+      "models": ["grok-imagine-image-lite", "grok-imagine-image"]
+    },
+    {
+      "id": 3,
+      "index": 1,
+      "name": "NSFW 渠道",
+      "nsfw": true,
+      "model": "grok-imagine-video",
+      "resolutions": ["1k", "2k", "4k"],
+      "models": ["grok-imagine-video"]
+    }
+  ],
+  "hint": "channel 参数填写渠道编号（id 字段，字符串，从 1 开始）；编号为渠道创建时分配，不随增删/排序变化。留空自动选第一个普通渠道"
+}</pre>
+                <ul class="small text-muted mb-3 ps-3">
+                    <li><code>id</code> 即 <code>channel</code> 参数的取值（示例中 NSFW 渠道 id 为 3，说明中间曾有渠道被删除，编号不复用）</li>
+                    <li><code>index</code> 仅为当前列表的<strong>展示顺序</strong>，会随渠道增删变化，<strong>请勿</strong>用作 channel 参数</li>
+                    <li><code>name</code> 与创作页面「生成渠道」下拉中的渠道名一致（NSFW 渠道在页面显示为「（NSFW）」）</li>
+                    <li><code>resolutions</code> / <code>models</code> 为该渠道支持的档位与模型，便于调用前校验</li>
+                    <li>curl：<code>curl "http://127.0.0.1:8900/api/v1/channels" -H "Authorization: Bearer sk-xxxxxxxx"</code></li>
+                </ul>
+
+                <hr>
+                <h6 class="fw-bold">6. curl 完整示例</h6>
                 <pre class="bg-light p-3 rounded small mb-1"># 提交生成任务
 curl -X POST http://127.0.0.1:8900/api/v1/generate \
   -H "Authorization: Bearer sk-xxxxxxxx" \
@@ -81,11 +116,11 @@ curl -o cat.png "http://127.0.0.1:8900/images/xxx.png"</pre>
                 <p class="small text-muted mt-2 mb-3">更多 Python 调用示例见项目 <code>docs/api.md</code>。</p>
 
                 <hr>
-                <h6 class="fw-bold">6. 错误码</h6>
+                <h6 class="fw-bold">7. 错误码</h6>
                 <table class="table table-sm small align-middle mb-0">
                     <thead><tr><th class="w-25">HTTP</th><th>说明</th></tr></thead>
                     <tbody>
-                        <tr><td>400</td><td>参数错误：无效 JSON（如 channel 传了数字）/ prompt 为空或超长 / 渠道无效 / 分辨率不属于该渠道，error 字段为具体原因</td></tr>
+                        <tr><td>400</td><td>参数错误：无效 JSON（如 channel 传了数字）/ prompt 为空或超长 / 渠道编号无效（不在 /api/v1/channels 返回的 id 中）/ 分辨率不属于该渠道，error 字段为具体原因</td></tr>
                         <tr><td>401</td><td>API Key 缺失或无效</td></tr>
                         <tr><td>402</td><td>积分不足（error 字段含所需积分，此次不扣分）</td></tr>
                         <tr><td>404</td><td>task_id 不存在或不属于该 Key 的账户</td></tr>

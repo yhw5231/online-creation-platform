@@ -46,10 +46,10 @@
                             {{if .Channels}}
                             <select name="channel" class="form-select" id="channelSelect" required>
                                 {{range .Channels}}
-                                <option value="{{.Idx}}" data-nsfw="{{.NSFWStr}}" data-resolutions="{{.ResolutionsCSV}}" data-models="{{.ModelsCSV}}" {{if eq .Idx $.DefChannelIdx}}selected{{end}}>{{.Name}}</option>
+                                <option value="{{.ID}}" data-nsfw="{{.NSFWStr}}" data-resolutions="{{.ResolutionsCSV}}" data-models="{{.ModelsCSV}}" {{if eq .Idx $.DefChannelIdx}}selected{{end}}>{{.ID}} · {{.Name}}</option>
                                 {{end}}
                             </select>
-                            <div class="form-text">按所选渠道生成，使用该渠道配置的默认模型与分辨率档位。</div>
+                            <div class="form-text">按所选渠道生成，使用该渠道配置的默认模型与分辨率档位。<br>渠道<strong>稳定编号</strong>（创建时分配，不随渠道增删/排序变化）即调用 API 时 <code>channel</code> 参数的取值，完整列表可用 <code>GET /api/v1/channels</code> 查询（详见 <a href="/api/docs">API 文档</a>）。</div>
                             {{else}}
                             <div class="alert alert-warning small py-2 mb-0">暂无可用的生成渠道，请联系管理员在系统设置中配置。</div>
                             {{end}}

@@ -598,8 +598,9 @@
       var div = document.createElement('div');
       div.className = 'endpoint-row border rounded-3 p-3 mb-3 bg-white';
       div.innerHTML =
+        '<input type="hidden" name="ep_id[]" value="">' +
         '<div class="row g-3">' +
-        '<div class="col-md-2"><label class="form-label fw-semibold">渠道名称</label><input name="ep_name[]" class="form-control" autocomplete="off" placeholder="渠道名称"></div>' +
+        '<div class="col-md-2"><label class="form-label fw-semibold">渠道名称 <span class="badge text-bg-light" title="新增渠道保存后自动分配稳定编号；编号即 API 调用 channel 参数取值">编号 自动</span></label><input name="ep_name[]" class="form-control" autocomplete="off" placeholder="渠道名称"></div>' +
         '<div class="col-md-3"><label class="form-label fw-semibold">API 地址</label><input name="ep_url[]" class="form-control" autocomplete="off" placeholder="https://grok.example.com/v1"></div>' +
         '<div class="col-md-3"><label class="form-label fw-semibold">API Key</label><input name="ep_key[]" type="text" class="form-control" autocomplete="off" placeholder="尚未配置，粘贴密钥"></div>' +
         '<div class="col-md-2"><label class="form-label fw-semibold">默认模型</label><input name="ep_model[]" class="form-control" list="ep-model-list" placeholder="grok-imagine-image-lite"></div>' +

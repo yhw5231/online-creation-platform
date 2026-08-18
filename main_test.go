@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -62,11 +63,11 @@ func TestAtoiDefault(t *testing.T) {
 		want int
 	}{
 		{"12", 1, 12},
-		{"0", 1, 1},      // non-positive falls back to default
-		{"-3", 1, 1},     // negative falls back to default
-		{"abc", 1, 1},    // non-numeric falls back
-		{"", 8, 8},       // empty falls back
-		{"  5 ", 1, 1},   // whitespace not parsed by Atoi
+		{"0", 1, 1},    // non-positive falls back to default
+		{"-3", 1, 1},   // negative falls back to default
+		{"abc", 1, 1},  // non-numeric falls back
+		{"", 8, 8},     // empty falls back
+		{"  5 ", 1, 1}, // whitespace not parsed by Atoi
 		{"999", 1, 999},
 	}
 	for _, c := range cases {
@@ -330,8 +331,8 @@ func TestExtForBytes(t *testing.T) {
 
 func TestNormalizeCheckinRange(t *testing.T) {
 	cases := []struct {
-		inMin, inMax string
-		wantMin,     wantMax string
+		inMin, inMax     string
+		wantMin, wantMax string
 	}{
 		{"5", "10", "5", "10"},   // normal
 		{"", "", "1", "20"},      // empty → defaults
@@ -615,7 +616,7 @@ func TestSettingsPersistence(t *testing.T) {
 		"enable_thirdparty_login": "true", "linuxdo_client_id": "demo-client-id",
 		"linuxdo_client_secret": "demo-secret",
 		"linuxdo_redirect_uri":  "https://auth.example.com/cb",
-		"storage_type": "s3", "storage_endpoint": "https://oss.example.com",
+		"storage_type":          "s3", "storage_endpoint": "https://oss.example.com",
 		"storage_bucket": "my-bucket", "storage_region": "ap-northeast-1",
 		"storage_username": "AKID", "storage_password": "SECRETKEY",
 		"storage_path_prefix": "images", "cleanup_enabled": "true",
@@ -757,7 +758,7 @@ func TestRedeemCodeLabel(t *testing.T) {
 
 // TestRedeemCodeTypes 验证积分兑换码 / 注册码分类型生成与使用隔离：
 // 积分码可兑换积分但不能注册；注册码可注册但不能兑换积分；
-// 旧版通用码（kind=''）两者皆可用。
+// 旧版通用码（kind=”）两者皆可用。
 func TestRedeemCodeTypes(t *testing.T) {
 	if err := models.InitDB(filepath.Join(t.TempDir(), "redeem.db")); err != nil {
 		t.Fatal(err)
@@ -888,11 +889,11 @@ func TestRedeemCodeTypes(t *testing.T) {
 	register := func(username, code string) (int, string) {
 		ww := httptest.NewRecorder()
 		rr := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(url.Values{
-			"_csrf":           {regCSRF},
-			"username":        {username},
-			"password":        {"123456"},
+			"_csrf":            {regCSRF},
+			"username":         {username},
+			"password":         {"123456"},
 			"confirm_password": {"123456"},
-			"reg_code":        {code},
+			"reg_code":         {code},
 		}.Encode()))
 		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		rr.Header.Set("Cookie", regCookie)
@@ -1072,5 +1073,273 @@ func TestRedeemCodeBatchAndRemark(t *testing.T) {
 	// 列表中每行都有可独立保存备注的表单控件
 	if !strings.Contains(body, "remark-form") {
 		t.Error("list should include per-row remark forms")
+	}
+}
+
+// TestRecordsTotalCostExcludesFailed 验证创作记录页"累计消耗"不统计
+// 失败（已退积分）的记录。
+func TestRecordsTotalCostExcludesFailed(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	// 页面渲染依赖全局模板
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+	// 造一个用户与三条记录：成功 x2（各10分）、失败 x1（10分已退回）
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, points INTEGER DEFAULT 0, role TEXT DEFAULT 'user', status INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, model TEXT,
+		n INTEGER DEFAULT 1, aspect_ratio TEXT, resolution TEXT, response_format TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT, error_msg TEXT,
+		channel TEXT, nsfw INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec(`INSERT INTO generation_records(user_id, prompt, cost_points, status) VALUES
+		(1,'成功一',10,'success'), (1,'成功二',10,'success'), (1,'失败一',10,'failed')`)
+
+	req := httptest.NewRequest(http.MethodGet, "/records", nil)
+	// gorilla/sessions 以请求为上下文保存会话，直接在此请求上写入即可
+	s, _ := store.Get(req, "session")
+	s.Values["userID"] = int64(1)
+	s.Values["username"] = "u"
+	s.Values["role"] = "user"
+	w0 := httptest.NewRecorder()
+	s.Save(req, w0)
+
+	w := httptest.NewRecorder()
+	recordsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String()[:200])
+	}
+	body, _ := io.ReadAll(w.Body)
+	idx := strings.Index(string(body), "累计消耗")
+	if idx < 0 {
+		t.Fatal("records page missing 累计消耗")
+	}
+	seg := strings.ReplaceAll(string(body)[idx:idx+120], "\n", " ")
+	t.Logf("total-cost segment: %s", seg)
+	if !strings.Contains(seg, "20") {
+		t.Errorf("累计消耗应为 20（仅成功记录 10+10），实际 segment: %s", seg)
+	}
+	if strings.Contains(seg, "30") {
+		t.Errorf("累计消耗不得计入失败退回积分（应为 20 而非 30）：%s", seg)
+	}
+	if !strings.Contains(seg, "<strong class=\"text-danger\">20</strong>") {
+		t.Errorf("累计消耗应精确显示为 20：%s", seg)
+	}
+}
+
+// TestCopyDirReplace 验证在线更新的模板/静态资源同步：递归拷贝、
+// 覆盖同名文件、补齐新文件、保留目录结构。
+func TestCopyDirReplace(t *testing.T) {
+	src := t.TempDir() + "/src"
+	dst := t.TempDir() + "/dst"
+	// 预置旧文件：同名的会被覆盖，独有的应保留（不删除）
+	for _, d := range []string{filepath.Join(src, "templates", "admin"), filepath.Join(src, "static", "css")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.MkdirAll(filepath.Join(dst, "templates", "admin"), 0o755)
+	for _, f := range [][2]string{
+		{filepath.Join(src, "templates", "index.html"), "新版首页"},
+		{filepath.Join(src, "templates", "admin", "settings.html"), "新版设置"},
+		{filepath.Join(src, "static", "css", "style.css"), "新版样式"},
+		{filepath.Join(dst, "templates", "index.html"), "旧版首页"},
+		{filepath.Join(dst, "templates", "admin", "users.html"), "不应被删除"},
+	} {
+		if err := os.WriteFile(f[0], []byte(f[1]), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := copyDirReplace(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	check := func(rel, want string) {
+		b, err := os.ReadFile(filepath.Join(dst, rel))
+		if err != nil {
+			t.Errorf("read %s: %v", rel, err)
+			return
+		}
+		if string(b) != want {
+			t.Errorf("%s = %q, want %q", rel, string(b), want)
+		}
+	}
+	check("templates/index.html", "新版首页")
+	check("templates/admin/settings.html", "新版设置")
+	check("static/css/style.css", "新版样式")
+	if _, err := os.Stat(filepath.Join(dst, "templates", "admin", "users.html")); err != nil {
+		t.Error("copyDirReplace 不应删除目标目录中独有的旧文件")
+	}
+}
+
+// TestResolveChannelStableID 验证 channel 按"稳定编号"解析：
+// 编号随渠道持久化、不随增删/排序变化；旧的"数组下标"不再有效。
+func TestResolveChannelStableID(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "ch.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	eps := []GenerationEndpoint{
+		{ID: 2, Name: "主渠道", APIURL: "https://a.example/v1", APIKey: "k1", Resolutions: []string{"1k", "2k"}, Models: defaultModels},
+		{ID: 5, Name: "NSFW渠道", APIURL: "https://b.example/v1", APIKey: "k2", NSFW: true, Resolutions: []string{"1k"}, Models: defaultModels},
+	}
+	raw, _ := json.Marshal(eps)
+	models.SetConfig("generation_endpoints", string(raw))
+
+	// 留空 = 自动选第一个普通渠道
+	ep, err := resolveChannel("")
+	if err != nil || ep.ID != 2 {
+		t.Errorf("empty channel should pick first normal channel id=2, got id=%d err=%v", ep.ID, err)
+	}
+	// 按稳定编号解析（与数组位置无关）
+	ep, err = resolveChannel("5")
+	if err != nil || ep.ID != 5 || !ep.NSFW {
+		t.Errorf("channel 5 should resolve to NSFW channel, got %+v err=%v", ep, err)
+	}
+	ep, err = resolveChannel("2")
+	if err != nil || ep.ID != 2 {
+		t.Errorf("channel 2 should resolve, got %+v err=%v", ep, err)
+	}
+	// 旧数组下标 / 不存在的编号一律报错（防止渠道变动后选错渠道）
+	for _, bad := range []string{"0", "1", "3", "abc", "-1"} {
+		if _, err := resolveChannel(bad); err == nil {
+			t.Errorf("channel %q should not resolve (ids are 2,5)", bad)
+		}
+	}
+}
+
+// TestFillEndpointIDs 验证缺失编号按最大编号递增补发（编号不复用）。
+func TestFillEndpointIDs(t *testing.T) {
+	eps := []GenerationEndpoint{
+		{Name: "A", APIURL: "u1"},
+		{ID: 7, Name: "B", APIURL: "u2"},
+		{Name: "C", APIURL: "u3"},
+	}
+	fillEndpointIDs(eps)
+	if eps[0].ID != 8 || eps[1].ID != 7 || eps[2].ID != 9 {
+		t.Errorf("fillEndpointIDs = %d,%d,%d want 8,7,9", eps[0].ID, eps[1].ID, eps[2].ID)
+	}
+}
+
+// TestMigrateEndpointIDs 验证启动迁移：历史无编号配置补发 1..n 并持久化，
+// 再次迁移幂等不变。
+func TestMigrateEndpointIDs(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "mig.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	old := []GenerationEndpoint{{Name: "A", APIURL: "u1"}, {Name: "B", APIURL: "u2"}}
+	raw, _ := json.Marshal(old)
+	models.SetConfig("generation_endpoints", string(raw))
+	migrateEndpointIDs()
+	got := loadEndpoints()
+	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("migrated ids = %d,%d want 1,2", got[0].ID, got[1].ID)
+	}
+	// 幂等：重复迁移不再改变编号
+	migrateEndpointIDs()
+	got2 := loadEndpoints()
+	if got2[0].ID != 1 || got2[1].ID != 2 {
+		t.Errorf("migrate not idempotent: %d,%d", got2[0].ID, got2[1].ID)
+	}
+}
+
+// TestSaveEndpointsKeepsStableIDs 验证设置页保存时渠道编号稳定：
+// 调整顺序、删除渠道、新增渠道都不影响已有渠道的编号，新渠道编号不复用。
+func TestSaveEndpointsKeepsStableIDs(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "save.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	submit := func(ids, urls, names, nsfw []string) {
+		form := url.Values{
+			"ep_id[]":           ids,
+			"ep_url[]":          urls,
+			"ep_name[]":         names,
+			"ep_key[]":          {"", "", ""},
+			"ep_model[]":        {"", "", ""},
+			"ep_nsfw[]":         nsfw,
+			"ep_res[]":          {"1k,2k", "1k", "1k"},
+			"ep_models[]":       {"", "", ""},
+			"ep_extra_models[]": {"", "", ""},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/admin/update-settings", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if err := req.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		saveEndpointsFromForm(req)
+	}
+	// 首次保存三条渠道（无编号）→ 顺序补发 1,2,3
+	submit([]string{"", "", ""}, []string{"https://a/v1", "https://b/v1", "https://c/v1"}, []string{"A", "B", "C"}, []string{"0", "1", "0"})
+	eps := loadEndpoints()
+	if len(eps) != 3 || eps[0].ID != 1 || eps[1].ID != 2 || eps[2].ID != 3 {
+		t.Fatalf("first save ids want 1,2,3 got %d,%d,%d", eps[0].ID, eps[1].ID, eps[2].ID)
+	}
+	// 调整顺序（B 提到首位）并删除 C：编号跟随渠道而非位置
+	submit([]string{"2", "1"}, []string{"https://b/v1", "https://a/v1"}, []string{"B", "A"}, []string{"1", "0"})
+	eps = loadEndpoints()
+	if len(eps) != 2 || eps[0].Name != "B" || eps[0].ID != 2 || eps[1].Name != "A" || eps[1].ID != 1 {
+		t.Fatalf("after reorder want B(id2),A(id1) got %+v", eps)
+	}
+	// 新增渠道（无编号）→ 编号不复用（应为 4）
+	submit([]string{"2", "1", ""}, []string{"https://b/v1", "https://a/v1", "https://d/v1"}, []string{"B", "A", "D"}, []string{"1", "0", "0"})
+	eps = loadEndpoints()
+	if len(eps) != 3 || eps[0].ID != 2 || eps[1].ID != 1 || eps[2].ID != 4 {
+		t.Fatalf("after add want B(2),A(1),D(4) got %+v", eps)
+	}
+}
+
+// TestAPIV1Channels 验证渠道列表接口返回稳定编号（id）与展示顺序（index）。
+func TestAPIV1Channels(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "chapi.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	eps := []GenerationEndpoint{
+		{ID: 2, Name: "主渠道", APIURL: "https://a/v1", Model: "m1", Resolutions: []string{"1k", "2k"}, Models: []string{"m1"}},
+		{ID: 5, Name: "备渠道", APIURL: "https://b/v1", NSFW: true, Resolutions: []string{"1k"}, Models: []string{"m2"}},
+	}
+	raw, _ := json.Marshal(eps)
+	models.SetConfig("generation_endpoints", string(raw))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/channels", nil)
+	w := httptest.NewRecorder()
+	apiChannelsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		OK       bool `json:"ok"`
+		Channels []struct {
+			ID          int      `json:"id"`
+			Index       int      `json:"index"`
+			Name        string   `json:"name"`
+			NSFW        bool     `json:"nsfw"`
+			Resolutions []string `json:"resolutions"`
+			Models      []string `json:"models"`
+		} `json:"channels"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK || len(resp.Channels) != 2 {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+	if resp.Channels[0].ID != 2 || resp.Channels[0].Index != 0 || resp.Channels[0].NSFW {
+		t.Errorf("first channel = %+v", resp.Channels[0])
+	}
+	if resp.Channels[1].ID != 5 || resp.Channels[1].Index != 1 || !resp.Channels[1].NSFW {
+		t.Errorf("second channel = %+v", resp.Channels[1])
 	}
 }

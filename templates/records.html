@@ -14,10 +14,10 @@
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0 mt-1" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
     <span class="small">提示：生成的图片保存在服务器本地，<strong>服务器可能定期清理旧数据</strong>。请及时下载保存图片到本地，或点击图片查看大图后下载原图。</span>
 </div>
-<form method="GET" action="/records" class="mb-3 d-flex gap-2" style="max-width: 360px;">
+<form method="GET" action="/records" class="mb-3 d-flex gap-2" style="max-width: 460px;">
     <input type="text" name="q" class="form-control" placeholder="按提示词搜索..." value="{{.Query}}" autocomplete="off">
-    <button type="submit" class="btn btn-primary btn-sm px-3">搜索</button>
-    {{if .Query}}<a href="/records" class="btn btn-outline-secondary btn-sm px-3">清除</a>{{end}}
+    <button type="submit" class="btn btn-primary btn-sm px-4 record-search-btn">搜索</button>
+    {{if .Query}}<a href="/records" class="btn btn-outline-secondary btn-sm px-3 flex-shrink-0">清除</a>{{end}}
 </form>
 
 {{if gt (len .Records) 0}}
@@ -49,9 +49,9 @@
                     {{if eq .Status "processing"}}<span class="badge text-bg-primary">生成中</span>
                     {{else if eq .Status "failed"}}<span class="badge text-bg-danger">失败</span>{{end}}
                 </div>
-                {{if eq .Status "failed"}}
-                <div class="small text-danger mb-1" title="{{.ErrorMsg}}">{{if .ErrorMsg}}{{trunc .ErrorMsg 50}}<br>{{end}}本次积分已退回。</div>
-                {{end}}
+                <div class="record-error">
+                    {{if eq .Status "failed"}}<div class="small text-danger" title="{{.ErrorMsg}}">{{if .ErrorMsg}}{{trunc .ErrorMsg 50}}<br>{{end}}本次积分已退回。</div>{{end}}
+                </div>
                 <div class="d-flex justify-content-between align-items-center small">
                     {{if eq .Status "failed"}}<span class="text-danger">已退回积分</span>
                     {{else}}<span class="text-muted">消耗 <span class="cost-badge">{{comma .CostPoints}}</span> 积分</span>{{end}}
