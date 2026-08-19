@@ -73,6 +73,16 @@ func (c *GrokClient) Generate(req GenRequest) (*GenResponse, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		// 504/502 属于网关或上游服务问题：把原始 HTML/JSON 报文换成用户
+		// 可读的提示，避免把 openresty 超时页等原始内容直接暴露给用户。
+		// 504：网关超时，通常意味着生成内容被网关拦截（审查/拦截超时）。
+		if resp.StatusCode == http.StatusGatewayTimeout {
+			return nil, fmt.Errorf("生成的内容可能被网关拦截（上游请求超时），请调整提示词或稍后重试")
+		}
+		// 502：上游服务暂不可用，或提示词未通过上游审核被拒。
+		if resp.StatusCode == http.StatusBadGateway {
+			return nil, fmt.Errorf("上游服务暂不可用或提示词未通过上游审核，请稍后重试或调整提示词")
+		}
 		note := strings.TrimSpace(string(data))
 		if utf8.RuneCountInString(note) > 300 {
 			note = string([]rune(note)[:300]) + "…（已截断）"

@@ -233,6 +233,7 @@ var defaultConfigs = map[string]string{
 	"generation_model":               "grok-imagine-image-lite",
 	"generation_endpoints":           "",
 	"generation_cost_points":         "10",
+	"generation_fail_penalty":        "0.1",
 	"storage_type":                   "", // none / s3 / webdav / post
 	"storage_endpoint":               "",
 	"storage_bucket":                 "",

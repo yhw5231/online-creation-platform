@@ -43,6 +43,11 @@
                             <input name="generation_cost_points" type="number" min="1" class="form-control" value="{{.Settings.generation_cost_points}}" autocomplete="off">
                         </div>
                         <div class="col-md-6">
+                            <label class="form-label fw-semibold">创作失败扣减（倍 / 张）</label>
+                            <input name="generation_fail_penalty" type="number" min="0" max="1" step="0.05" class="form-control" value="{{if .Settings.generation_fail_penalty}}{{.Settings.generation_fail_penalty}}{{else}}0.1{{end}}" autocomplete="off">
+                            <div class="form-text">任务失败时按"单张积分 × 张数 × 倍率"扣减，其余退回（默认 0.1，即失败也扣 10%、退回 90%）；填 0 为失败全额退回。</div>
+                        </div>
+                        <div class="col-md-6">
                             <label class="form-label fw-semibold">管理员用户名</label>
                             <input name="admin_username" class="form-control" value="{{.AdminUsername}}" minlength="2" maxlength="32" autocomplete="off">
                             <div class="form-text">后台管理员账号的用户名（2-32 个字符）。修改后需使用新用户名登录，与已有用户名冲突时保存失败。</div>

@@ -19,6 +19,8 @@ import (
 
 	"online-creation-platform/models"
 	"online-creation-platform/services"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestSessionSecretDefault(t *testing.T) {
@@ -473,6 +475,52 @@ func TestGenerateErrorTruncation(t *testing.T) {
 	}
 }
 
+// TestGenerateGatewayTimeoutFriendly verifies a 504 (openresty time-out HTML)
+// is translated into a user-friendly hint instead of the raw HTML page.
+func TestGenerateGatewayTimeoutFriendly(t *testing.T) {
+	htmlBody := "<html>\n<head><title>504 Gateway Time-out</title></head>\n<body>\n<center><h1>504 Gateway Time-out</h1></center>\n<hr><center>openresty</center>\n</body>\n</html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusGatewayTimeout)
+		w.Write([]byte(htmlBody))
+	}))
+	defer srv.Close()
+
+	c := services.NewGrokClient(srv.URL, "test-key")
+	_, err := c.Generate(services.GenRequest{Prompt: "hello"})
+	if err == nil {
+		t.Fatal("expected error for 504 response")
+	}
+	if !strings.Contains(err.Error(), "网关拦截") {
+		t.Fatalf("expected gateway-blocked hint, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "<html>") || strings.Contains(err.Error(), "openresty") {
+		t.Fatalf("raw HTML must not leak to user: %q", err.Error())
+	}
+}
+
+// TestGenerateBadGatewayFriendly verifies a 502 upstream_unavailable JSON
+// response is translated into a user-friendly hint instead of raw JSON.
+func TestGenerateBadGatewayFriendly(t *testing.T) {
+	jsonBody := `{"error":{"code":"upstream_unavailable","message":"上游服务暂不可用","param":null,"type":"server_error"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(jsonBody))
+	}))
+	defer srv.Close()
+
+	c := services.NewGrokClient(srv.URL, "test-key")
+	_, err := c.Generate(services.GenRequest{Prompt: "hello"})
+	if err == nil {
+		t.Fatal("expected error for 502 response")
+	}
+	if !strings.Contains(err.Error(), "上游服务暂不可用") || !strings.Contains(err.Error(), "未通过上游审核") {
+		t.Fatalf("expected upstream-unavailable/audit hint, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "upstream_unavailable") || strings.Contains(err.Error(), "server_error") {
+		t.Fatalf("raw JSON must not leak to user: %q", err.Error())
+	}
+}
+
 func TestGenerateParseErrorSnippet(t *testing.T) {
 	rumble := strings.Repeat("not-json", 30000)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -809,6 +857,7 @@ func TestSettingsPersistence(t *testing.T) {
 		"_csrf":                          {csrf},
 		"site_name":                      {"测试站点"},
 		"generation_cost_points":         {"15"},
+		"generation_fail_penalty":        {"0.25"},
 		"open_registration":              {"true"},
 		"enable_password_registration":   {"false"},
 		"enable_thirdparty_registration": {"true"},
@@ -848,6 +897,7 @@ func TestSettingsPersistence(t *testing.T) {
 
 	want := map[string]string{
 		"site_name": "测试站点", "generation_cost_points": "15",
+		"generation_fail_penalty":         "0.25",
 		"open_registration": "true", "enable_password_registration": "false",
 		"enable_thirdparty_registration": "true", "require_reg_code": "true",
 		"initial_points": "50", "enable_daily_checkin": "false",
@@ -896,6 +946,7 @@ func TestSettingsPersistence(t *testing.T) {
 		"_csrf":                          {csrf},
 		"site_name":                      {"新站点名"},
 		"generation_cost_points":         {"abc"}, // 非法：应保留 15
+		"generation_fail_penalty":        {"xyz"}, // 非法倍率：应保留 0.25
 		"open_registration":              {"true"},
 		"enable_password_registration":   {"false"},
 		"enable_thirdparty_registration": {"true"},
@@ -937,6 +988,9 @@ func TestSettingsPersistence(t *testing.T) {
 	}
 	if got := get("generation_cost_points"); got != "15" {
 		t.Errorf("invalid number must keep old value, got %q", got)
+	}
+	if got := get("generation_fail_penalty"); got != "0.25" {
+		t.Errorf("invalid fail penalty must keep old value, got %q", got)
 	}
 	if got := get("checkin_random_min"); got != "3" {
 		t.Errorf("invalid random range must keep min, got %q", got)
@@ -1819,13 +1873,15 @@ func TestRedeemCodeBatchAndRemark(t *testing.T) {
 }
 
 // TestRecordsTotalCostExcludesFailed 验证创作记录页"累计消耗"不统计
-// 失败（已退积分）的记录。
+// 失败（已全额退积分，倍率=0）的记录。
 func TestRecordsTotalCostExcludesFailed(t *testing.T) {
 	dir := t.TempDir()
 	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
 		t.Fatal(err)
 	}
 	defer models.DB.Close()
+	// 倍率 0 = 失败全额退回：失败记录不计入累计消耗（原语义）
+	models.SetConfig("generation_fail_penalty", "0")
 	// 页面渲染依赖全局模板
 	tpl = template.Must(template.New("").Funcs(template.FuncMap{
 		"comma":   commaFormat,
@@ -1891,8 +1947,69 @@ func TestRecordsTotalCostExcludesFailed(t *testing.T) {
 	}
 }
 
+// TestRecordsTotalCostIncludesFailPenalty 验证"累计消耗"会按创作失败扣减
+// 倍率计入失败记录未退回的部分（10 × 0.3 = 3）。
+func TestRecordsTotalCostIncludesFailPenalty(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	models.SetConfig("generation_fail_penalty", "0.3")
+	// 页面渲染依赖全局模板
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, points INTEGER DEFAULT 0, role TEXT DEFAULT 'user', status INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, model TEXT,
+		n INTEGER DEFAULT 1, aspect_ratio TEXT, resolution TEXT, response_format TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT, error_msg TEXT,
+		channel TEXT, nsfw INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec(`INSERT INTO generation_records(user_id, prompt, cost_points, status) VALUES
+		(1,'成功一',10,'success'), (1,'成功二',10,'success'), (1,'失败一',10,'failed')`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0,
+		path TEXT DEFAULT '', storage_type TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
+
+	req := httptest.NewRequest(http.MethodGet, "/records", nil)
+	s, _ := store.Get(req, "session")
+	s.Values["userID"] = int64(1)
+	s.Values["username"] = "u"
+	s.Values["role"] = "user"
+	w0 := httptest.NewRecorder()
+	s.Save(req, w0)
+
+	w := httptest.NewRecorder()
+	recordsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String()[:200])
+	}
+	body, _ := io.ReadAll(w.Body)
+	idx := strings.Index(string(body), "累计消耗")
+	if idx < 0 {
+		t.Fatal("records page missing 累计消耗")
+	}
+	seg := strings.ReplaceAll(string(body)[idx:idx+120], "\n", " ")
+	t.Logf("total-cost segment: %s", seg)
+	if !strings.Contains(seg, "<strong class=\"text-danger\">23</strong>") {
+		t.Errorf("累计消耗应为 23（成功 20 + 失败扣减 10×0.3=3），实际 segment: %s", seg)
+	}
+	if strings.Contains(seg, "30") {
+		t.Errorf("累计消耗不得全额计入失败记录（应为 23 而非 30）：%s", seg)
+	}
+}
+
 // TestRefundSystemLogAndUsersOAuth 验证：
-// 1) markTaskFailed 退回积分的同时写入系统日志（action=refund，points_delta>0）；
+// 1) markTaskFailed 按"创作失败扣减倍率"（默认 0.1）扣除部分积分后把其余
+//    退回（30 积分 × 0.1 = 扣 3、退 27），同时写入系统日志（action=refund）；
 // 2) 管理后台用户列表展示第三方绑定信息（provider/ID/用户名）。
 func TestRefundSystemLogAndUsersOAuth(t *testing.T) {
 	dir := t.TempDir()
@@ -1910,6 +2027,8 @@ func TestRefundSystemLogAndUsersOAuth(t *testing.T) {
 		"maskKey": maskKey,
 	}).ParseGlob("templates/*.html"))
 	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+	// 默认倍率 0.1：失败扣减 = 30 × 0.1 = 3，退回 27
+	models.SetConfig("generation_fail_penalty", "0.1")
 
 	res, _ := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id, oauth_username) VALUES(?,?,?,?,?,?,?,?)",
 		"oauthUser", "x", 100, "user", 1, "linuxdo", "12345", "linuxdo_nick")
@@ -1918,12 +2037,12 @@ func TestRefundSystemLogAndUsersOAuth(t *testing.T) {
 		uid, "测试", 30, "processing", "abc12345")
 	rid, _ := res2.LastInsertId()
 
-	// 1) 退回积分 + 系统日志
+	// 1) 部分退回积分（扣 3 退 27）+ 系统日志
 	markTaskFailed(rid, "模拟生成失败")
 	var points int64
 	models.DB.QueryRow("SELECT points FROM users WHERE id=?", uid).Scan(&points)
-	if points != 130 {
-		t.Errorf("points=%d, want 130 (100+30 refund)", points)
+	if points != 127 {
+		t.Errorf("points=%d, want 127 (100+30-3 penalty)", points)
 	}
 	var cnt int
 	models.DB.QueryRow("SELECT COUNT(*) FROM system_logs WHERE user_id=? AND action='refund' AND points_delta>0", uid).Scan(&cnt)
@@ -1934,6 +2053,9 @@ func TestRefundSystemLogAndUsersOAuth(t *testing.T) {
 	models.DB.QueryRow("SELECT detail FROM system_logs WHERE user_id=? AND action='refund'", uid).Scan(&detail)
 	if !strings.Contains(detail, "生成失败退回") {
 		t.Errorf("refund detail=%q, want contains 生成失败退回", detail)
+	}
+	if !strings.Contains(detail, "27") {
+		t.Errorf("refund detail=%q, want contains refunded amount 27", detail)
 	}
 
 	// 2) 管理后台用户列表显示第三方绑定
@@ -1956,6 +2078,41 @@ func TestRefundSystemLogAndUsersOAuth(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("admin users page missing %q", want)
 		}
+	}
+}
+
+// TestMarkTaskFailedPenaltyFull 验证倍率=1 时失败任务全额扣减、
+// 不再退回任何积分（也不产生 refund 系统日志）。
+func TestMarkTaskFailedPenaltyFull(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	models.SetConfig("generation_fail_penalty", "1")
+
+	res, _ := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)",
+		"penaltyUser", "x", 100, "user", 1)
+	uid, _ := res.LastInsertId()
+	res2, _ := models.DB.Exec("INSERT INTO generation_records(user_id, prompt, cost_points, status, task_key) VALUES(?,?,?,?,?)",
+		uid, "测试", 40, "processing", "penalty01")
+	rid, _ := res2.LastInsertId()
+
+	markTaskFailed(rid, "模拟生成失败")
+	var points int64
+	models.DB.QueryRow("SELECT points FROM users WHERE id=?", uid).Scan(&points)
+	if points != 100 {
+		t.Errorf("points=%d, want 100 (全额扣减不退分)", points)
+	}
+	var status string
+	models.DB.QueryRow("SELECT status FROM generation_records WHERE id=?", rid).Scan(&status)
+	if status != "failed" {
+		t.Errorf("record status=%q, want failed", status)
+	}
+	var cnt int
+	models.DB.QueryRow("SELECT COUNT(*) FROM system_logs WHERE user_id=? AND action='refund'", uid).Scan(&cnt)
+	if cnt != 0 {
+		t.Errorf("refund log count=%d, want 0 (无退回不记日志)", cnt)
 	}
 }
 
@@ -2077,6 +2234,55 @@ func TestAdminRecordsReview(t *testing.T) {
 	models.DB.QueryRow("SELECT COUNT(*) FROM generation_images WHERE record_id=2").Scan(&n)
 	if n != 0 {
 		t.Error("admin delete should remove image rows")
+	}
+}
+
+// TestDashboardGenStats 验证数据概览页的创作统计：总计/今日的成功次数、
+// 失败次数与成功率（成功率 = 成功 ÷ (成功+失败)）。
+func TestDashboardGenStats(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	// 总计：成功 2、失败 1（成功率 66.7%）；今日：成功 1、失败 1（成功率 50.0%）
+	models.DB.Exec("INSERT INTO generation_records(user_id, prompt, cost_points, status, created_at) VALUES"+
+		"(1,'昨日成功',10,'success',datetime('now','-1 day')),"+
+		"(1,'今日成功',10,'success',datetime('now')),"+
+		"(1,'今日失败',10,'failed',datetime('now'))")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	s, _ := store.Get(req, "session")
+	s.Values["userID"] = int64(1)
+	s.Values["username"] = "admin"
+	s.Values["role"] = "admin"
+	w0 := httptest.NewRecorder()
+	s.Save(req, w0)
+
+	w := httptest.NewRecorder()
+	adminDashboardHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, truncateRunes(w.Body.String(), 200))
+	}
+	body := w.Body.String()
+	for _, want := range []string{"创作成功率（总计）", "66.7%", "今日创作成功率", "50.0%", "成功", "失败"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard missing %q", want)
+		}
+	}
+	// 失败次数以红色标注（总计 1 次失败）
+	if !strings.Contains(body, "text-danger fw-semibold\">1</span>") {
+		t.Errorf("dashboard should show failed count: %s", truncateRunes(body, 300))
 	}
 }
 
@@ -2708,5 +2914,222 @@ func TestAJAXNoPageRefresh(t *testing.T) {
 	}
 	if oauthErr.OK || oauthErr.RegCode != "注册码无效或已被使用" {
 		t.Errorf("oauth setup bad code error = %+v", oauthErr)
+	}
+}
+
+// TestAdminUserManagement 验证用户管理的后台能力：管理员重置密码、修改/取消
+// 第三方绑定、删除用户（相关数据清理、兑换码释放、用户名可重新注册、防止
+// 删除自己或仅剩的管理员）。
+func TestAdminUserManagement(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "manage.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	var adminID int64
+	models.DB.QueryRow("SELECT id FROM users WHERE username='admin'").Scan(&adminID)
+	// 管理员会话 + CSRF
+	buildAdmin := func() (string, string) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+		s, _ := store.New(r, "session")
+		s.Values["userID"] = adminID
+		s.Values["username"] = "admin"
+		s.Values["role"] = "admin"
+		s.Save(r, w)
+		c := w.Header().Get("Set-Cookie")
+		r2 := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+		r2.Header.Set("Cookie", c)
+		csrf := csrfToken(w, r2)
+		return csrf, lastCookie(w)
+	}
+	csrf, cookie := buildAdmin()
+	post := func(path string, form url.Values) *httptest.ResponseRecorder {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr.Header.Set("Cookie", cookie)
+		switch path {
+		case "/admin/user/password":
+			adminUserPasswordHandler(ww, rr)
+		case "/admin/user/oauth-unbind":
+			adminUserOAuthUnbindHandler(ww, rr)
+		case "/admin/user/oauth-update":
+			adminUserOAuthUpdateHandler(ww, rr)
+		case "/admin/user/delete":
+			adminUserDeleteHandler(ww, rr)
+		default:
+			t.Fatalf("unexpected path %s", path)
+		}
+		return ww
+	}
+
+	// 目标用户 alice：已绑定 linuxdo，附带签到/积分流水/占用的兑换码/API Key/创作记录
+	hash, _ := bcrypt.GenerateFromPassword([]byte("oldpass123"), bcrypt.DefaultCost)
+	res, err := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id, oauth_username) VALUES(?,?,?,?,?,?,?,?)",
+		"alice", string(hash), 100, "user", 1, "linuxdo", "9001", "ld_alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceID, _ := res.LastInsertId()
+	aliceIDStr := fmt.Sprintf("%d", aliceID)
+	models.DB.Exec("INSERT INTO checkin_logs(user_id, date, points) VALUES(?, '2026-01-01', 10)", aliceID)
+	models.DB.Exec("INSERT INTO points_log(user_id, delta, balance, description) VALUES(?, 100, 100, '测试')", aliceID)
+	models.DB.Exec("INSERT INTO redeem_codes(code, points, used_by, status) VALUES('ALICECODE', 30, ?, 'used')", aliceID)
+	models.DB.Exec("INSERT INTO api_keys(user_id, name, key_hash) VALUES(?, 'alice-key', 'abc')", aliceID)
+	rRec, _ := models.DB.Exec("INSERT INTO generation_records(user_id, prompt, cost_points, status, task_key) VALUES(?, 'alice prompt', 10, 'success', 'alicekey1')", aliceID)
+	recID, _ := rRec.LastInsertId()
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(?, 0, '/images/alice1.png')", recID)
+	systemLog(nil, aliceID, "alice", "login", "登录成功", 0)
+
+	// 1) 过短密码被拒
+	if ww := post("/admin/user/password", url.Values{"_csrf": {csrf}, "id": {aliceIDStr}, "new_password": {"123"}}); ww.Code != http.StatusBadRequest {
+		t.Fatalf("short password status = %d, want 400", ww.Code)
+	}
+	// 2) 管理员重置密码：旧密码失效、新密码可登录
+	if ww := post("/admin/user/password", url.Values{"_csrf": {csrf}, "id": {aliceIDStr}, "new_password": {"newpass456"}}); ww.Code != http.StatusSeeOther {
+		t.Fatalf("reset password status = %d, want 303: %s", ww.Code, truncateRunes(ww.Body.String(), 200))
+	}
+	login := func(pw string) *httptest.ResponseRecorder {
+		wl := httptest.NewRecorder()
+		rl := httptest.NewRequest(http.MethodGet, "/login", nil)
+		lc := csrfToken(wl, rl)
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(url.Values{
+			"_csrf":    {lc},
+			"username": {"alice"},
+			"password": {pw},
+		}.Encode()))
+		rr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr.Header.Set("Cookie", wl.Header().Get("Set-Cookie"))
+		loginHandler(ww, rr)
+		return ww
+	}
+	if ww := login("oldpass123"); ww.Code != http.StatusOK {
+		t.Fatalf("old password login status = %d, want 200 (rejected)", ww.Code)
+	}
+	if ww := login("newpass456"); ww.Code != http.StatusSeeOther || ww.Header().Get("Location") != "/create" {
+		t.Fatalf("new password login = %d loc=%q, want 303 /create", ww.Code, ww.Header().Get("Location"))
+	}
+
+	// 3) 修改第三方绑定
+	if ww := post("/admin/user/oauth-update", url.Values{
+		"_csrf":          {csrf},
+		"id":             {aliceIDStr},
+		"oauth_provider": {"linuxdo"},
+		"oauth_id":       {"9002"},
+		"oauth_username": {"ld_alice2"},
+	}); ww.Code != http.StatusSeeOther {
+		t.Fatalf("oauth update status = %d, want 303", ww.Code)
+	}
+	var prov, oid, oun string
+	models.DB.QueryRow("SELECT oauth_provider, oauth_id, oauth_username FROM users WHERE id=?", aliceID).Scan(&prov, &oid, &oun)
+	if prov != "linuxdo" || oid != "9002" || oun != "ld_alice2" {
+		t.Fatalf("oauth update = %q/%q/%q, want linuxdo/9002/ld_alice2", prov, oid, oun)
+	}
+	// 冲突：同一第三方账号已绑定其他用户时拒绝
+	models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id, oauth_username) VALUES(?,?,?,?,?,?,?,?)",
+		"bob", "x", 0, "user", 1, "linuxdo", "9002", "ld_bob")
+	if ww := post("/admin/user/oauth-update", url.Values{
+		"_csrf":          {csrf},
+		"id":             {aliceIDStr},
+		"oauth_provider": {"linuxdo"},
+		"oauth_id":       {"9002"},
+		"oauth_username": {"dup"},
+	}); ww.Code != http.StatusConflict {
+		t.Fatalf("duplicate bind status = %d, want 409", ww.Code)
+	}
+	models.DB.QueryRow("SELECT oauth_id FROM users WHERE id=?", aliceID).Scan(&oid)
+	if oid != "9002" {
+		t.Fatalf("bind should remain 9002 after rejected update, got %q", oid)
+	}
+	// 4) 取消第三方绑定
+	if ww := post("/admin/user/oauth-unbind", url.Values{"_csrf": {csrf}, "id": {aliceIDStr}}); ww.Code != http.StatusSeeOther {
+		t.Fatalf("unbind status = %d, want 303", ww.Code)
+	}
+	models.DB.QueryRow("SELECT COALESCE(oauth_provider,''), COALESCE(oauth_id,''), COALESCE(oauth_username,'') FROM users WHERE id=?", aliceID).Scan(&prov, &oid, &oun)
+	if prov != "" || oid != "" || oun != "" {
+		t.Fatalf("unbind should clear oauth columns, got %q/%q/%q", prov, oid, oun)
+	}
+	// 未绑定再解绑 → 400
+	if ww := post("/admin/user/oauth-unbind", url.Values{"_csrf": {csrf}, "id": {aliceIDStr}}); ww.Code != http.StatusBadRequest {
+		t.Fatalf("double unbind status = %d, want 400", ww.Code)
+	}
+	// oauth-update 的第三方 ID 留空同样视为解绑
+	post("/admin/user/oauth-update", url.Values{"_csrf": {csrf}, "id": {aliceIDStr}, "oauth_provider": {"linuxdo"}, "oauth_id": {"9003"}, "oauth_username": {"ld3"}})
+	if ww := post("/admin/user/oauth-update", url.Values{"_csrf": {csrf}, "id": {aliceIDStr}, "oauth_provider": {"linuxdo"}, "oauth_id": {""}, "oauth_username": {""}}); ww.Code != http.StatusSeeOther {
+		t.Fatalf("oauth-clear status = %d, want 303", ww.Code)
+	}
+	models.DB.QueryRow("SELECT COALESCE(oauth_provider,'') FROM users WHERE id=?", aliceID).Scan(&prov)
+	if prov != "" {
+		t.Fatalf("empty oauth_id should clear binding, provider=%q", prov)
+	}
+
+	// 5) 删除用户：自我保护、数据清理、兑换码释放、用户名可重新注册
+	if ww := post("/admin/user/delete", url.Values{"_csrf": {csrf}, "id": {fmt.Sprintf("%d", adminID)}}); ww.Code != http.StatusBadRequest {
+		t.Fatalf("self delete status = %d, want 400", ww.Code)
+	}
+	if ww := post("/admin/user/delete", url.Values{"_csrf": {csrf}, "id": {aliceIDStr}}); ww.Code != http.StatusSeeOther {
+		t.Fatalf("delete status = %d, want 303: %s", ww.Code, truncateRunes(ww.Body.String(), 200))
+	}
+	var n int64
+	models.DB.QueryRow("SELECT COUNT(*) FROM users WHERE id=?", aliceID).Scan(&n)
+	if n != 0 {
+		t.Errorf("after delete users = %d, want 0", n)
+	}
+	for _, tbl := range []string{"generation_records", "checkin_logs", "points_log", "api_keys"} {
+		var m int64
+		models.DB.QueryRow("SELECT COUNT(*) FROM "+tbl+" WHERE user_id=?", aliceID).Scan(&m)
+		if m != 0 {
+			t.Errorf("after delete %s = %d, want 0", tbl, m)
+		}
+	}
+	// 创作图片行按 record 关联，单独断言
+	var imgN int
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_images WHERE record_id=?", recID).Scan(&imgN)
+	if imgN != 0 {
+		t.Errorf("after delete generation_images = %d, want 0", imgN)
+	}
+	// 兑换码释放回可用状态
+	var codeN int
+	models.DB.QueryRow("SELECT COUNT(*) FROM redeem_codes WHERE code='ALICECODE' AND status='active' AND used_by=0 AND used_at IS NULL").Scan(&codeN)
+	if codeN != 1 {
+		t.Error("redeem code should be refunded to active after user deletion")
+	}
+	// 系统日志保留为审计，归属置 0
+	var logN int
+	models.DB.QueryRow("SELECT COUNT(*) FROM system_logs WHERE username='alice' AND user_id=0").Scan(&logN)
+	if logN == 0 {
+		t.Error("audit system_logs should be kept (user_id zeroed) after deletion")
+	}
+	// 删除审计记录存在
+	var delN int
+	models.DB.QueryRow("SELECT COUNT(*) FROM system_logs WHERE action='admin_delete_user'").Scan(&delN)
+	if delN != 1 {
+		t.Error("admin_delete_user audit log missing")
+	}
+	// 用户名可重新注册
+	if _, err := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)", "alice", "h", 0, "user", 1); err != nil {
+		t.Fatalf("re-register with freed username should succeed: %v", err)
+	}
+
+	// 6) 用户管理页展示新操作项
+	ww := httptest.NewRecorder()
+	rr := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	rr.Header.Set("Cookie", cookie)
+	adminUsersHandler(ww, rr)
+	for _, s := range []string{"重置密码", "保存绑定", "删除用户", "±积分"} {
+		if !strings.Contains(ww.Body.String(), s) {
+			t.Errorf("admin users page missing %q", s)
+		}
 	}
 }

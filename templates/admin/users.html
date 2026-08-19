@@ -71,6 +71,47 @@
                                     <button type="submit" class="btn btn-sm btn-outline-info btn-loading" data-loading-text="..." data-confirm="确认调整该用户的积分余额？负数表示扣除，正数表示追加。">调整</button>
                                 </form>
                             </div>
+                            <div class="mt-2">
+                                <form method="POST" action="/admin/user/password" class="d-flex gap-1" data-submit="loading">
+                                    <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                    <input type="hidden" name="id" value="{{.ID}}">
+                                    <input type="password" name="new_password" class="form-control form-control-sm" style="width: 96px" placeholder="新密码" minlength="6" autocomplete="new-password" required>
+                                    <button type="submit" class="btn btn-sm btn-outline-warning btn-loading" data-loading-text="..." data-confirm="确定将 “{{.Username}}” 的密码重置为输入的新密码吗？重置后原密码立即失效。">重置密码</button>
+                                </form>
+                            </div>
+                            <div class="mt-2">
+                                <div class="d-flex gap-1 align-items-center">
+                                    <span class="text-muted small">第三方：</span>
+                                    {{if .OAuthProvider}}
+                                    <span class="badge text-bg-info-subtle">{{.OAuthProvider}}</span>
+                                    <form method="POST" action="/admin/user/oauth-unbind" class="d-inline" data-submit="loading">
+                                        <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                        <input type="hidden" name="id" value="{{.ID}}">
+                                        <button type="submit" class="btn btn-sm btn-outline-secondary btn-loading" data-loading-text="..." data-confirm="确定要取消 “{{.Username}}” 的第三方绑定吗？取消后该账号仅可通过用户名密码登录。">解绑</button>
+                                    </form>
+                                    {{else}}<span class="text-muted small">未绑定</span>{{end}}
+                                </div>
+                                <form method="POST" action="/admin/user/oauth-update" class="d-flex gap-1 mt-1" data-submit="loading">
+                                    <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                    <input type="hidden" name="id" value="{{.ID}}">
+                                    <select name="oauth_provider" class="form-select form-select-sm" style="width: 92px">
+                                        <option value="linuxdo" {{if eq .OAuthProvider "linuxdo"}}selected{{end}}>linuxdo</option>
+                                        <option value="" {{if eq .OAuthProvider ""}}selected{{end}}>无</option>
+                                    </select>
+                                    <input type="text" name="oauth_id" class="form-control form-control-sm" style="width: 104px" placeholder="第三方ID" value="{{.OAuthID}}" autocomplete="off">
+                                    <input type="text" name="oauth_username" class="form-control form-control-sm" style="width: 104px" placeholder="第三方用户名" value="{{.OAuthUsername}}" autocomplete="off">
+                                    <button type="submit" class="btn btn-sm btn-outline-info btn-loading" data-loading-text="..." data-confirm="确定按填写的内容更新 “{{.Username}}” 的第三方绑定吗？">保存绑定</button>
+                                </form>
+                            </div>
+                            {{if ne $.CurrentID .ID}}
+                            <div class="mt-2">
+                                <form method="POST" action="/admin/user/delete" class="d-inline" data-submit="loading">
+                                    <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                    <input type="hidden" name="id" value="{{.ID}}">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger btn-loading" data-loading-text="..." data-confirm="确定要删除用户 “{{.Username}}” 吗？其创作记录、图片、积分、API Key 等全部数据将被永久删除且无法恢复，删除后该用户名可重新注册。">删除用户</button>
+                                </form>
+                            </div>
+                            {{end}}
                         </td>
                     </tr>
                     {{else}}

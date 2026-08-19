@@ -502,6 +502,10 @@ func main() {
 	http.HandleFunc("/admin/user/promote", authMiddleware(adminMiddleware(adminUserPromoteHandler)))
 	http.HandleFunc("/admin/user/demote", authMiddleware(adminMiddleware(adminUserDemoteHandler)))
 	http.HandleFunc("/admin/user/adjust-points", authMiddleware(adminMiddleware(adminAdjustPointsHandler)))
+	http.HandleFunc("/admin/user/password", authMiddleware(adminMiddleware(adminUserPasswordHandler)))
+	http.HandleFunc("/admin/user/oauth-unbind", authMiddleware(adminMiddleware(adminUserOAuthUnbindHandler)))
+	http.HandleFunc("/admin/user/oauth-update", authMiddleware(adminMiddleware(adminUserOAuthUpdateHandler)))
+	http.HandleFunc("/admin/user/delete", authMiddleware(adminMiddleware(adminUserDeleteHandler)))
 	http.HandleFunc("/admin/redeem-codes", authMiddleware(adminMiddleware(adminRedeemCodesHandler)))
 	http.HandleFunc("/admin/redeem-codes/generate", authMiddleware(adminMiddleware(adminGenerateRedeemCodesHandler)))
 	http.HandleFunc("/admin/redeem-codes/void", authMiddleware(adminMiddleware(adminVoidRedeemCodeHandler)))
@@ -1410,16 +1414,19 @@ func logPoints(uid, delta int64, desc string) {
 
 // systemLogActions 行为的中文名（管理后台日志筛选下拉与列表展示共用）。
 var systemLogActions = map[string]string{
-	"login":        "登录",
-	"login_fail":   "登录失败",
-	"logout":       "退出登录",
-	"register":     "注册",
-	"checkin":      "签到",
-	"create":       "创作",
-	"redeem":       "兑换",
-	"api":          "API 调用",
-	"refund":       "积分退回",
-	"admin_rename": "管理员操作",
+	"login":             "登录",
+	"login_fail":        "登录失败",
+	"logout":            "退出登录",
+	"register":          "注册",
+	"checkin":           "签到",
+	"create":            "创作",
+	"redeem":            "兑换",
+	"api":               "API 调用",
+	"refund":            "积分退回",
+	"admin_rename":      "管理员操作",
+	"admin_password":    "重置密码",
+	"admin_oauth":       "调整第三方绑定",
+	"admin_delete_user": "删除用户",
 }
 
 // systemLogActionLabel 返回行为的中文名，未知行为原样返回。
@@ -1714,6 +1721,19 @@ func createHandler(w http.ResponseWriter, r *http.Request) {
 
 func generationCost() int {
 	return atoiDefault(models.GetConfigOr("generation_cost_points", "10"), 10)
+}
+
+// generationFailPenalty 创作失败扣减倍率（0~1，默认 0.1）：失败时按
+// "本次扣费总额 × 倍率"扣减积分、其余退回用户；0 = 失败全额退回。
+func generationFailPenalty() float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(models.GetConfigOr("generation_fail_penalty", "0.1")), 64)
+	if err != nil || v < 0 {
+		return 0.1
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 func siteName() string {
@@ -2351,21 +2371,35 @@ func rowsAffected(r sql.Result) int64 {
 }
 
 // markTaskFailed 把任务标记为失败并退回本次扣费（幂等：仅处理中任务生效）。
+// 失败并非全额退款：按后台设置"创作失败扣减倍率"（默认 0.1 倍）扣除部分
+// 积分后再退回其余，避免失败请求全部白嫖。
 func markTaskFailed(recordID int64, msg string) {
 	var userID, cost int64
 	if err := models.DB.QueryRow("SELECT user_id, cost_points FROM generation_records WHERE id=?", recordID).Scan(&userID, &cost); err != nil {
 		log.Printf("markTaskFailed %d: %v", recordID, err)
 		return
 	}
+	// 失败扣减部分 = 本次扣费 × 倍率（向上取整为整数积分），其余退回
+	penalty := int64(math.Round(float64(cost) * generationFailPenalty()))
+	if penalty > cost {
+		penalty = cost
+	}
+	refund := cost - penalty
 	if rowsAffected(mustExec("UPDATE generation_records SET status='failed', error_msg=? WHERE id=? AND status='processing'", truncateRunes(msg, 300), recordID)) == 0 {
 		return
 	}
-	mustExec("UPDATE users SET points = points + ? WHERE id=?", cost, userID)
-	logPoints(userID, cost, "生成失败，积分退回")
-	// 系统日志同样登记退回记录（创作/API 生成失败时，管理后台应能看到积分退回）
-	var uname string
-	models.DB.QueryRow("SELECT username FROM users WHERE id=?", userID).Scan(&uname)
-	systemLog(nil, userID, uname, "refund", "生成失败退回：任务 #"+strconv.FormatInt(recordID, 10), cost)
+	if refund > 0 {
+		mustExec("UPDATE users SET points = points + ? WHERE id=?", refund, userID)
+		if penalty > 0 {
+			logPoints(userID, refund, "生成失败，扣除"+strconv.FormatInt(penalty, 10)+"积分后退回")
+		} else {
+			logPoints(userID, refund, "生成失败，积分退回")
+		}
+		// 系统日志同样登记退回记录（创作/API 生成失败时，管理后台应能看到积分退回）
+		var uname string
+		models.DB.QueryRow("SELECT username FROM users WHERE id=?", userID).Scan(&uname)
+		systemLog(nil, userID, uname, "refund", "生成失败退回：任务 #"+strconv.FormatInt(recordID, 10)+"，退回 "+strconv.FormatInt(refund, 10)+" 积分", refund)
+	}
 }
 
 // cleanUpTask 执行一次自动清理：同时受"保留天数"与"磁盘上限"两个规则
@@ -2689,8 +2723,9 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		rec["AltURLs"] = altMap[rec["ID"].(int64)]
 	}
-	// 累计消耗只统计成功/进行中的记录：失败任务的扣费已退回（见
-	// markTaskFailed），若一并计入会让"累计消耗"虚高。搜索过滤保持一致。
+	// 累计消耗统计：成功/进行中的记录计入全额扣费；失败记录只计入
+	// "创作失败扣减"部分（按 generation_fail_penalty 倍率扣除、未退回的那部分）。
+	// 搜索过滤保持一致。
 	var totalCost int64
 	costArgs := append([]interface{}{}, userID)
 	costSQL := "SELECT COALESCE(SUM(cost_points),0) FROM generation_records WHERE user_id=? AND status != 'failed'"
@@ -2699,6 +2734,15 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 		costArgs = append(costArgs, "%"+likeEscape(q)+"%")
 	}
 	models.DB.QueryRow(costSQL, costArgs...).Scan(&totalCost)
+	var failedCost int64
+	failedArgs := append([]interface{}{}, userID)
+	failedSQL := "SELECT COALESCE(SUM(cost_points),0) FROM generation_records WHERE user_id=? AND status='failed'"
+	if q != "" {
+		failedSQL += " AND prompt LIKE ? ESCAPE '\\'"
+		failedArgs = append(failedArgs, "%"+likeEscape(q)+"%")
+	}
+	models.DB.QueryRow(failedSQL, failedArgs...).Scan(&failedCost)
+	totalCost += int64(math.Round(float64(failedCost) * generationFailPenalty()))
 	pageBase := "/records?"
 	if q != "" {
 		pageBase += "q=" + url.QueryEscape(q) + "&"
@@ -3586,6 +3630,232 @@ func adminUsersBack(r *http.Request) string {
 	return target
 }
 
+// adminUserPasswordHandler 管理员为用户重置密码：新密码由管理员指定并写入
+// bcrypt 哈希，用户下次登录（用户名+密码）即使用新密码。支持任意账号
+// （含第三方绑定账号，绑定账号同样可用用户名密码登录）。
+func adminUserPasswordHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !verifyCSRF(r) {
+		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		return
+	}
+	idStr := strings.TrimSpace(r.FormValue("id"))
+	newPw := r.FormValue("new_password")
+	var username string
+	if err := models.DB.QueryRow("SELECT username FROM users WHERE id=?", idStr).Scan(&username); err != nil {
+		http.Error(w, "未找到该用户", http.StatusBadRequest)
+		return
+	}
+	// 与注册/修改密码的校验口径一致
+	if len(newPw) < 6 {
+		http.Error(w, "新密码长度至少 6 位", http.StatusBadRequest)
+		return
+	}
+	hashed, err := bcrypt.GenerateFromPassword([]byte(newPw), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "密码加密失败，请重试", http.StatusInternalServerError)
+		return
+	}
+	res, err := models.DB.Exec("UPDATE users SET password_hash=? WHERE id=?", string(hashed), idStr)
+	if err != nil {
+		http.Error(w, "保存失败，请重试", http.StatusInternalServerError)
+		return
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		http.Error(w, "未找到该用户", http.StatusBadRequest)
+		return
+	}
+	curUID, curName, _ := currentUser(r)
+	systemLog(r, curUID, curName, "admin_password", "管理员重置用户 "+username+"（ID "+idStr+"）的密码", 0)
+	flashRedirect(w, r, adminUsersBack(r), "已重置用户 “"+username+"” 的密码")
+}
+
+// adminUserOAuthUnbindHandler 管理员取消用户的第三方账号绑定：只清空绑定
+// 字段，账号本身保留（登录方式切换为用户名+密码）。
+func adminUserOAuthUnbindHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !verifyCSRF(r) {
+		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		return
+	}
+	idStr := strings.TrimSpace(r.FormValue("id"))
+	var username, provider string
+	if err := models.DB.QueryRow("SELECT username, COALESCE(oauth_provider,'') FROM users WHERE id=?", idStr).Scan(&username, &provider); err != nil {
+		http.Error(w, "未找到该用户", http.StatusBadRequest)
+		return
+	}
+	if provider == "" {
+		http.Error(w, "该用户未绑定第三方账号", http.StatusBadRequest)
+		return
+	}
+	res, err := models.DB.Exec("UPDATE users SET oauth_provider='', oauth_id='', oauth_username='' WHERE id=?", idStr)
+	if err != nil {
+		http.Error(w, "操作失败，请重试", http.StatusInternalServerError)
+		return
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		http.Error(w, "未找到该用户", http.StatusBadRequest)
+		return
+	}
+	curUID, curName, _ := currentUser(r)
+	systemLog(r, curUID, curName, "admin_oauth", "管理员解除了用户 "+username+"（ID "+idStr+"）的第三方绑定（"+provider+"）", 0)
+	flashRedirect(w, r, adminUsersBack(r), "已取消 “"+username+"” 的第三方绑定")
+}
+
+// adminUserOAuthUpdateHandler 管理员修改用户的第三方绑定信息（provider /
+// 第三方 ID / 第三方用户名），用于修正错误绑定或更换绑定的第三方账号。
+// 第三方 ID 留空视为取消绑定；同一第三方账号不允许同时绑定多个本站账号。
+func adminUserOAuthUpdateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !verifyCSRF(r) {
+		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		return
+	}
+	idStr := strings.TrimSpace(r.FormValue("id"))
+	var username string
+	if err := models.DB.QueryRow("SELECT username FROM users WHERE id=?", idStr).Scan(&username); err != nil {
+		http.Error(w, "未找到该用户", http.StatusBadRequest)
+		return
+	}
+	provider := strings.TrimSpace(r.FormValue("oauth_provider"))
+	oauthID := strings.TrimSpace(r.FormValue("oauth_id"))
+	oauthUsername := strings.TrimSpace(r.FormValue("oauth_username"))
+	if len(provider) > 32 || len(oauthID) > 64 || len(oauthUsername) > 64 {
+		http.Error(w, "绑定信息过长", http.StatusBadRequest)
+		return
+	}
+	if oauthID == "" {
+		// 未填第三方 ID 视为取消绑定（与独立解绑按钮行为一致）
+		provider = ""
+		oauthUsername = ""
+	}
+	if provider != "" && oauthID != "" {
+		// 唯一性校验：同一第三方账号不得同时绑定多个本站账号
+		var other int64
+		if err := models.DB.QueryRow("SELECT id FROM users WHERE oauth_provider=? AND oauth_id=? AND id!=?", provider, oauthID, idStr).Scan(&other); err == nil {
+			http.Error(w, "该第三方账号已绑定其他用户", http.StatusConflict)
+			return
+		}
+	}
+	res, err := models.DB.Exec("UPDATE users SET oauth_provider=?, oauth_id=?, oauth_username=? WHERE id=?",
+		provider, oauthID, oauthUsername, idStr)
+	if err != nil {
+		http.Error(w, "操作失败，请重试", http.StatusInternalServerError)
+		return
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		http.Error(w, "未找到该用户", http.StatusBadRequest)
+		return
+	}
+	curUID, curName, _ := currentUser(r)
+	detail := "管理员调整了用户 " + username + "（ID " + idStr + "）的第三方绑定"
+	if provider == "" {
+		detail += "：已取消绑定"
+	} else {
+		detail += "：" + provider + " ID " + oauthID
+		if oauthUsername != "" {
+			detail += "（" + oauthUsername + "）"
+		}
+	}
+	systemLog(r, curUID, curName, "admin_oauth", detail, 0)
+	flashRedirect(w, r, adminUsersBack(r), "已更新 “"+username+"” 的第三方绑定")
+}
+
+// adminUserDeleteHandler 删除用户及其全部相关数据（创作记录、图片、签到、
+// 积分流水、API Key、第三方绑定），并释放其占用的兑换码。删除后用户名不再
+// 占用，可重新注册。系统日志保留（归属置 0），并追加一条删除审计记录。
+func adminUserDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !verifyCSRF(r) {
+		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		return
+	}
+	idStr := r.FormValue("id")
+	cur, _, _ := currentUser(r)
+	if strconv.FormatInt(cur, 10) == idStr {
+		http.Error(w, "不能删除当前登录的管理员账号", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "无效的用户 ID", http.StatusBadRequest)
+		return
+	}
+	var username, role string
+	if err := models.DB.QueryRow("SELECT username, role FROM users WHERE id=?", id).Scan(&username, &role); err != nil {
+		http.Error(w, "未找到该用户", http.StatusBadRequest)
+		return
+	}
+	if role == "admin" {
+		var activeAdmins int
+		models.DB.QueryRow("SELECT COUNT(*) FROM users WHERE role='admin' AND status=1").Scan(&activeAdmins)
+		if activeAdmins <= 1 {
+			http.Error(w, "系统至少需要保留一名管理员", http.StatusBadRequest)
+			return
+		}
+	}
+	// 先收集该用户的归档图片（本地路径 + 外部存储引用），便于事务提交后清理文件
+	var paths, remoteRefs []string
+	rows, err := models.DB.Query("SELECT gi.path, gi.storage_path FROM generation_images gi JOIN generation_records gr ON gr.id=gi.record_id WHERE gr.user_id=?", id)
+	if err == nil {
+		for rows.Next() {
+			var p, sp string
+			if rows.Scan(&p, &sp) == nil {
+				if p != "" {
+					paths = append(paths, p)
+				}
+				if sp != "" {
+					remoteRefs = append(remoteRefs, sp)
+				}
+			}
+		}
+		rows.Close()
+	}
+	tx, err := models.DB.Begin()
+	if err != nil {
+		http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
+		return
+	}
+	// 释放该用户占用的兑换码：退回可用状态，供其他用户使用
+	if _, err := tx.Exec("UPDATE redeem_codes SET status='active', used_by=0, used_at=NULL WHERE used_by=?", id); err != nil {
+		tx.Rollback()
+		http.Error(w, "删除失败，请重试", http.StatusInternalServerError)
+		return
+	}
+	for _, stmt := range []string{
+		"DELETE FROM generation_images WHERE record_id IN (SELECT id FROM generation_records WHERE user_id=?)",
+		"DELETE FROM generation_records WHERE user_id=?",
+		"DELETE FROM checkin_logs WHERE user_id=?",
+		"DELETE FROM points_log WHERE user_id=?",
+		"DELETE FROM api_keys WHERE user_id=?",
+		// system_logs 保留作审计（用户名仍可见），仅清除用户归属
+		"UPDATE system_logs SET user_id=0 WHERE user_id=?",
+		"DELETE FROM users WHERE id=?",
+	} {
+		if _, err := tx.Exec(stmt, id); err != nil {
+			tx.Rollback()
+			http.Error(w, "删除失败，请重试", http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "删除失败，请重试", http.StatusInternalServerError)
+		return
+	}
+	// 清理本地图片文件与外部存储对象（尽力而为）
+	for _, p := range paths {
+		if strings.HasPrefix(p, "/images/") {
+			os.Remove("data" + p)
+		}
+	}
+	if deleter, ok := getUploader().(services.RemoteDeleter); ok {
+		for _, ref := range remoteRefs {
+			if err := deleter.Delete(ref); err != nil {
+				log.Printf("remote delete failed for %s: %v", ref, err)
+			}
+		}
+	}
+	curUID, curName, _ := currentUser(r)
+	systemLog(r, curUID, curName, "admin_delete_user", "管理员删除了用户 "+username+"（ID "+strconv.FormatInt(id, 10)+"，角色 "+role+"）及其全部数据，该用户名可重新注册", 0)
+	flashRedirect(w, r, adminUsersBack(r), "已删除用户 “"+username+"”，该用户名可重新注册")
+}
+
 // adminAdjustPointsHandler grants or deducts points for a user, writing the
 // change into the points ledger for transparency.
 func adminAdjustPointsHandler(w http.ResponseWriter, r *http.Request) {
@@ -3651,6 +3921,23 @@ func adminDashboardHandler(w http.ResponseWriter, r *http.Request) {
 	models.DB.QueryRow("SELECT COUNT(*) FROM users WHERE date(created_at,'localtime')=date('now','localtime')").Scan(&todayReg)
 	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE date(created_at,'localtime')=date('now','localtime')").Scan(&todayGen)
 
+	// 创作结果统计：成功/失败次数与成功率（分总计与今日两组）。
+	// 成功率 = 成功 ÷ (成功+失败)，进行中的记录不计入分母。
+	var genSuccess, genFailed int
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE status='success'").Scan(&genSuccess)
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE status='failed'").Scan(&genFailed)
+	genRate := "--"
+	if genSuccess+genFailed > 0 {
+		genRate = fmt.Sprintf("%.1f%%", float64(genSuccess)/float64(genSuccess+genFailed)*100)
+	}
+	var genSuccessToday, genFailedToday int
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE status='success' AND date(created_at,'localtime')=date('now','localtime')").Scan(&genSuccessToday)
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE status='failed' AND date(created_at,'localtime')=date('now','localtime')").Scan(&genFailedToday)
+	genRateToday := "--"
+	if genSuccessToday+genFailedToday > 0 {
+		genRateToday = fmt.Sprintf("%.1f%%", float64(genSuccessToday)/float64(genSuccessToday+genFailedToday)*100)
+	}
+
 	// 最近动态：新的创作记录与新增用户
 	var recentRecords []map[string]interface{}
 	rowsRec, err := models.DB.Query("SELECT g.prompt, COALESCE(u.username,''), g.cost_points, g.created_at FROM generation_records g LEFT JOIN users u ON u.id=g.user_id ORDER BY g.id DESC LIMIT 5")
@@ -3698,6 +3985,12 @@ func adminDashboardHandler(w http.ResponseWriter, r *http.Request) {
 		"TodayGens":     todayGen,
 		"Records":       records,
 		"Images":        images,
+		"GenSuccess":    genSuccess,
+		"GenFailed":     genFailed,
+		"GenRate":       genRate,
+		"GenSuccessToday": genSuccessToday,
+		"GenFailedToday":  genFailedToday,
+		"GenRateToday":    genRateToday,
 		"Codes":         codes,
 		"CodesActive":   codesActive,
 		"CodesUsed":     codesUsed,
@@ -3778,6 +4071,14 @@ func adminUpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		// 随机签到：min 必须 <= max，否则两者都不落库
 		if (key == "checkin_random_min" || key == "checkin_random_max") &&
 			atoiDefault(r.Form.Get("checkin_random_min"), 1) > atoiDefault(r.Form.Get("checkin_random_max"), 1) {
+			continue
+		}
+		// 创作失败扣减倍率：0~1 的浮点数，非法或越界一律保留旧值
+		if key == "generation_fail_penalty" {
+			f, err := strconv.ParseFloat(value, 64)
+			if err == nil && f >= 0 && f <= 1 {
+				models.SetConfig(key, strconv.FormatFloat(f, 'f', -1, 64))
+			}
 			continue
 		}
 		if min, isNum := numericMin[key]; isNum {
