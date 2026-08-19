@@ -122,9 +122,9 @@
         {{if .TaskID}}
         <div class="card app-card mt-4 fade-in-up">
             <div class="card-header py-3 px-4">
-                <h6 class="mb-0 fw-bold">生成进度 <span class="text-muted small fw-normal">#{{.TaskID}}</span></h6>
+                <h6 class="mb-0 fw-bold">生成进度 <span class="text-muted small fw-normal">#{{.TaskKey}}</span></h6>
             </div>
-            <div class="card-body p-4" id="taskDetail" data-task-id="{{.TaskID}}" data-task-status="{{.TaskStatus}}">
+            <div class="card-body p-4" id="taskDetail" data-task-id="{{.TaskKey}}" data-task-status="{{.TaskStatus}}">
                 <div class="d-flex align-items-center gap-2 text-muted">
                     <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
                     <span class="small">任务已提交，正在排队生成…页面将自动刷新进度。</span>
@@ -144,7 +144,7 @@
             </div>
             <div class="card-body p-3" id="recentTasks">
                 {{range .RecentTasks}}
-                <div class="recent-task d-flex align-items-start gap-3 py-2 px-2 rounded" data-task-id="{{.ID}}" data-task-status="{{.Status}}">
+                <div class="recent-task d-flex align-items-start gap-3 py-2 px-2 rounded" data-task-id="{{.TaskKey}}" data-task-status="{{.Status}}">
                     <div class="recent-task-thumb flex-shrink-0">
                         {{if .ImageURL}}<img src="{{.ImageURL}}" alt="任务缩略图" loading="lazy">
                         {{else}}<span class="recent-task-ph">{{if eq .Status "success"}}无图{{else if eq .Status "failed"}}失败{{else}}…{{end}}</span>{{end}}
@@ -152,7 +152,7 @@
                     <div class="flex-grow-1 min-w-0">
                         <p class="record-prompt mb-1" title="{{.Prompt}}">{{.Prompt}}</p>
                         <div class="d-flex align-items-center gap-2 flex-wrap">
-                            <span class="text-muted small">#{{.ID}} · {{.CreatedAt}} · ×{{.N}}</span>
+                            <span class="text-muted small">#{{.TaskKey}} · {{.CreatedAt}} · ×{{.N}}</span>
                             {{if eq .Status "processing"}}<span class="badge text-bg-primary">生成中</span>
                             {{else if eq .Status "success"}}<span class="badge text-bg-success">已完成</span>
                             {{else}}<span class="badge text-bg-danger">失败</span>{{end}}

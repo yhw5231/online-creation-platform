@@ -4,45 +4,52 @@
         <div class="card app-card fade-in-up">
             <div class="card-header py-3 px-4">
                 <h5 class="mb-0 fw-bold">API 接口文档</h5>
-                <div class="text-muted small mt-1">通过 API Key 调用生成图片，积分扣减规则与网页完全相同</div>
+                <div class="text-muted small mt-1">OpenAI 兼容的 <code>/v1/images/generations</code> 接口，积分扣减规则与网页完全相同</div>
             </div>
             <div class="card-body p-4 p-md-5">
 
                 <h6 class="fw-bold">1. 获取 API Key</h6>
-                <p class="small text-muted mb-1">登录后进入 <a href="/profile">个人主页</a> →「API Key」卡片点击「生成 API Key」。</p>
+                <p class="small text-muted mb-1">登录后进入 <a href="/profile">个人主页</a> →「API Key」卡片：</p>
                 <ul class="small text-muted mb-3 ps-3">
+                    <li>可生成<strong>多个</strong> API Key，每个 Key 需填写<strong>名称</strong>（如「官网小程序」「脚本A」）用于区分用途</li>
+                    <li>每个 Key 在生成时<strong>必须绑定一个生成渠道</strong>：<code>/v1/images/generations</code> 的 OpenAI 格式请求中没有渠道参数，因此「用哪个渠道」在创建 Key 时就固定下来，无法在调用时更改</li>
                     <li>新 Key 明文<strong class="text-danger">仅显示一次</strong>，请立即复制保存；数据库只存 SHA-256 哈希，无法找回明文</li>
-                    <li>随时可「刷新 Key」：旧 Key 立即失效</li>
-                    <li>每个用户同时只有一个有效的 API Key</li>
+                    <li>随时可删除任意 Key（删除后该 Key 立即失效），也可继续生成更多 Key</li>
                 </ul>
 
                 <hr>
                 <h6 class="fw-bold">2. 认证方式</h6>
-                <p class="small text-muted mb-2">所有接口请求头携带 Key 即可（二选一）：</p>
+                <p class="small text-muted mb-2">所有接口请求头携带任意一个有效 Key 即可（二选一）：</p>
                 <pre class="bg-light p-3 rounded small mb-1">Authorization: Bearer sk-xxxxxxxx
 X-API-Key: sk-xxxxxxxx</pre>
                 <p class="small text-muted">Key 缺失 / 无效 / 账号被禁用均返回 HTTP 401。</p>
 
                 <hr>
                 <h6 class="fw-bold">3. 生成图片</h6>
-                <p class="small mb-1"><code>POST /api/v1/generate</code>（JSON 请求体）</p>
+                <p class="small mb-1"><code>POST /v1/images/generations</code>（OpenAI Images API 兼容格式，JSON 请求体）</p>
                 <table class="table table-sm small align-middle">
                     <thead><tr><th class="w-25">参数</th><th class="w-10">必填</th><th>说明</th></tr></thead>
                     <tbody>
                         <tr><td><code>prompt</code></td><td>是</td><td>提示词，最长 4000 字</td></tr>
-                        <tr><td><code>channel</code></td><td>否</td><td>渠道<strong>稳定编号</strong>（字符串，如 <code>"1"</code>），留空自动选第一个普通渠道。编号在渠道创建时分配、不随渠道增删/排序变化；可在<strong>创作页面「生成渠道」下拉</strong>看到（编号 · 渠道名），或调用 <code>GET /api/v1/channels</code> 查询</td></tr>
+                        <tr><td><code>model</code></td><td>否</td><td>生成模型，须为该 Key 绑定渠道支持的模型；留空自动用渠道默认模型</td></tr>
                         <tr><td><code>n</code></td><td>否</td><td>生成数量，1–4，默认 1</td></tr>
-                        <tr><td><code>aspect_ratio</code></td><td>否</td><td>1:1 / 16:9 / 4:3 / 3:4 / 9:16 / 21:9，默认 1:1</td></tr>
-                        <tr><td><code>resolution</code></td><td>否</td><td>分辨率档位（如 1k/2k/4k），须为该渠道支持的档位，默认取渠道第一个档位；渠道不支持时返回 400</td></tr>
+                        <tr><td><code>size</code></td><td>否</td><td>OpenAI 尺寸，如 <code>1024x1024</code> / <code>1792x1024</code> / <code>1024x1792</code>，自动换算为宽高比与分辨率档位；默认 1024x1024</td></tr>
+                        <tr><td><code>response_format</code></td><td>否</td><td><code>url</code>（默认，返回图片地址）/ <code>b64_json</code>（返回图片 base64 内容）</td></tr>
                     </tbody>
                 </table>
-                <p class="small text-muted mb-2">返回格式由系统后台自适应固定为 URL，<strong>不接受</strong> <code>response_format</code> 参数。</p>
-                <p class="small mb-1">成功响应（任务异步处理，立即返回）：</p>
-                <pre class="bg-light p-3 rounded small mb-3">{"ok":true,"task_id":123,"message":"任务已提交"}</pre>
+                <p class="small text-muted mb-2">「渠道」等本站专有参数已随 API Key 绑定，请求体中<strong>无需也不能</strong>指定。</p>
+                <p class="small mb-1"><strong>同步返回</strong>：本接口会等待图片生成完成后一次性返回结果（OpenAI 语义）。成功响应：</p>
+                <pre class="bg-light p-3 rounded small mb-1">{
+  "created": 1750000000,
+  "data": [
+    {"url": "/images/1750000000000_ab12cd.png"}
+  ]
+}</pre>
+                <p class="small text-muted mb-3">请求 <code>response_format=b64_json</code> 时 <code>data</code> 每项为 <code>{"b64_json": "..."}</code>。图片地址拼接站点地址即可下载：<code>http://127.0.0.1:8900/images/1750000000000_ab12cd.png</code></p>
 
                 <hr>
-                <h6 class="fw-bold">4. 查询任务状态</h6>
-                <p class="small mb-1"><code>GET /api/v1/status?task_id=xxx</code></p>
+                <h6 class="fw-bold">4. 查询任务状态（旧接口）</h6>
+                <p class="small mb-1"><code>GET /api/v1/status?task_id=xxx</code>（仅用于兼容旧版调用方，新代码无需使用）</p>
                 <p class="small mb-1">成功响应：</p>
                 <pre class="bg-light p-3 rounded small mb-1">{
   "ok": true,
@@ -55,7 +62,6 @@ X-API-Key: sk-xxxxxxxx</pre>
 }</pre>
                 <ul class="small text-muted mt-2 mb-3 ps-3">
                     <li><code>status</code>：<code>processing</code>（生成中，建议每 2–3 秒轮询）/ <code>success</code>（成功，<code>images</code> 为图片路径列表）/ <code>failed</code>（失败，<code>error</code> 为原因，积分已退回）</li>
-                    <li>图片拼接站点地址即可下载（无需 Key）：<code>http://127.0.0.1:8900/images/xxx.png</code></li>
                     <li>task_id 不存在或不属于该 Key 的账户：返回 404</li>
                 </ul>
 
@@ -87,29 +93,28 @@ X-API-Key: sk-xxxxxxxx</pre>
   "hint": "channel 参数填写渠道编号（id 字段，字符串，从 1 开始）；编号为渠道创建时分配，不随增删/排序变化。留空自动选第一个普通渠道"
 }</pre>
                 <ul class="small text-muted mb-3 ps-3">
-                    <li><code>id</code> 即 <code>channel</code> 参数的取值（示例中 NSFW 渠道 id 为 3，说明中间曾有渠道被删除，编号不复用）</li>
-                    <li><code>index</code> 仅为当前列表的<strong>展示顺序</strong>，会随渠道增删变化，<strong>请勿</strong>用作 channel 参数</li>
+                    <li><code>id</code> 即个人主页生成 API Key 时「绑定渠道」下拉的取值</li>
                     <li><code>name</code> 与创作页面「生成渠道」下拉中的渠道名一致（NSFW 渠道在页面显示为「（NSFW）」）</li>
-                    <li><code>resolutions</code> / <code>models</code> 为该渠道支持的档位与模型，便于调用前校验</li>
-                    <li>curl：<code>curl "http://127.0.0.1:8900/api/v1/channels" -H "Authorization: Bearer sk-xxxxxxxx"</code></li>
+                    <li><code>resolutions</code> / <code>models</code> 为该渠道支持的档位与模型，便于创建 Key 前确认</li>
+                    <li><code>index</code> 仅为当前列表的<strong>展示顺序</strong>，会随渠道增删变化，<strong>请勿</strong>用作渠道标识</li>
                 </ul>
 
                 <hr>
                 <h6 class="fw-bold">6. curl 完整示例</h6>
-                <pre class="bg-light p-3 rounded small mb-1"># 提交生成任务
-curl -X POST http://127.0.0.1:8900/api/v1/generate \
+                <pre class="bg-light p-3 rounded small mb-1"># 生成图片（OpenAI 兼容，同步返回）
+curl -X POST http://127.0.0.1:8900/v1/images/generations \
   -H "Authorization: Bearer sk-xxxxxxxx" \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"一只猫","n":1,"resolution":"2k"}'
+  -d '{"prompt":"一只猫","n":1,"size":"1024x1024"}'
 
-# 查询任务状态（循环轮询直到完成）
-for i in $(seq 1 30); do
-  RESP=$(curl -s "http://127.0.0.1:8900/api/v1/status?task_id=123" \
-    -H "Authorization: Bearer sk-xxxxxxxx")
-  echo "$RESP"
-  echo "$RESP" | grep -q '"processing"' || break
-  sleep 2
-done
+# 生成 2 张并返回 base64
+curl -X POST http://127.0.0.1:8900/v1/images/generations \
+  -H "Authorization: Bearer sk-xxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"一只猫","n":2,"response_format":"b64_json"}'
+
+# 查询可用渠道（创建 API Key 前确认渠道编号）
+curl "http://127.0.0.1:8900/api/v1/channels" -H "Authorization: Bearer sk-xxxxxxxx"
 
 # 下载图片（无需 Key）
 curl -o cat.png "http://127.0.0.1:8900/images/xxx.png"</pre>
@@ -120,10 +125,9 @@ curl -o cat.png "http://127.0.0.1:8900/images/xxx.png"</pre>
                 <table class="table table-sm small align-middle mb-0">
                     <thead><tr><th class="w-25">HTTP</th><th>说明</th></tr></thead>
                     <tbody>
-                        <tr><td>400</td><td>参数错误：无效 JSON（如 channel 传了数字）/ prompt 为空或超长 / 渠道编号无效（不在 /api/v1/channels 返回的 id 中）/ 分辨率不属于该渠道，error 字段为具体原因</td></tr>
+                        <tr><td>400</td><td>参数错误：无效 JSON / prompt 为空或超长 / size 或模型不被渠道支持 / response_format 非法，error.message 为具体原因</td></tr>
                         <tr><td>401</td><td>API Key 缺失或无效</td></tr>
-                        <tr><td>402</td><td>积分不足（error 字段含所需积分，此次不扣分）</td></tr>
-                        <tr><td>404</td><td>task_id 不存在或不属于该 Key 的账户</td></tr>
+                        <tr><td>402</td><td>积分不足（error.message 含所需积分，此次不扣分）</td></tr>
                         <tr><td>405</td><td>使用了错误的 HTTP 方法</td></tr>
                         <tr><td>500</td><td>系统繁忙 / 任务创建失败（此情况积分已退回）</td></tr>
                     </tbody>

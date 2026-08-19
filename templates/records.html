@@ -26,7 +26,7 @@
     <div class="col-6 col-md-4 col-xl-3">
         <div class="record-card">
             {{if .ImageURL}}
-            <img src="{{.ImageURL}}" class="record-cover" data-lightbox loading="lazy" alt="创作缩略图" data-cache-key="{{.ID}}-0" {{if .AltURLs}}data-alt="{{index .AltURLs 0}}"{{end}}>
+            <img src="{{.ImageURL}}" class="record-cover" data-lightbox loading="lazy" alt="创作缩略图" data-cache-key="{{.TaskKey}}-0" {{if .AltURLs}}data-alt="{{index .AltURLs 0}}"{{end}}>
             {{else}}
             <div class="record-cover record-cover-empty">
                 <span class="text-muted small">{{if eq .Status "failed"}}制作失败{{else}}暂无图片{{end}}</span>
@@ -34,7 +34,7 @@
             {{end}}
             {{if gt (len .ImagesSub) 0}}
             <div class="record-subs">
-                {{range $i, $img := .ImagesSub}}<img src="{{$img}}" loading="lazy" data-lightbox alt="作品缩略图" data-cache-key="{{$.ID}}-{{add $i 1}}" {{if ge (len $.AltURLs) (add $i 2)}}data-alt="{{index $.AltURLs (add $i 1)}}"{{end}}>{{end}}
+                {{range $i, $img := .ImagesSub}}<img src="{{$img}}" loading="lazy" data-lightbox alt="作品缩略图" data-cache-key="{{$.TaskKey}}-{{add $i 1}}" {{if ge (len $.AltURLs) (add $i 2)}}data-alt="{{index $.AltURLs (add $i 1)}}"{{end}}>{{end}}
             </div>
             {{end}}
             <div class="record-body">
@@ -58,7 +58,7 @@
                     <span class="text-muted">{{.CreatedAt}}</span>
                 </div>
                 <div class="d-flex justify-content-between align-items-center mt-2 pt-2 record-foot">
-                    <span class="text-muted small">#{{.ID}}</span>
+                    <span class="text-muted small">#{{.TaskKey}}</span>
                     <div class="d-flex align-items-center gap-2">
                         {{if eq .Status "success"}}
                         {{if .ImageURL}}
@@ -71,7 +71,7 @@
                         <a href="/create?prompt={{urlquery .Prompt}}" class="btn btn-sm btn-outline-primary" title="沿用这条提示词再次创作">再生成</a>
                         <form method="POST" action="/records/delete" class="d-inline" data-submit="loading">
                             <input type="hidden" name="_csrf" value="{{$.CSRF}}">
-                            <input type="hidden" name="id" value="{{.ID}}">
+                            <input type="hidden" name="id" value="{{.TaskKey}}">
                             <button type="submit" class="btn btn-sm btn-outline-danger btn-loading" data-loading-text="..." data-confirm="确定删除这条创作记录吗？">删除</button>
                         </form>
                     </div>

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"log"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -39,6 +40,7 @@ func migrate() error {
 			email TEXT DEFAULT '',
 			oauth_provider TEXT DEFAULT '',
 			oauth_id TEXT DEFAULT '',
+			oauth_username TEXT DEFAULT '',
 			points INTEGER DEFAULT 0,
 			role TEXT DEFAULT 'user',
 			status INTEGER DEFAULT 1,
@@ -62,7 +64,8 @@ func migrate() error {
 			response_format TEXT DEFAULT 'url',
 			nsfw INTEGER DEFAULT 0,
 			error_msg TEXT DEFAULT '',
-			channel TEXT DEFAULT ''
+			channel TEXT DEFAULT '',
+			task_key TEXT DEFAULT ''
 		)`,
 		`CREATE TABLE IF NOT EXISTS redeem_codes (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,6 +103,29 @@ func migrate() error {
 			storage_type TEXT DEFAULT '',
 			storage_path TEXT DEFAULT ''
 		)`,
+		`CREATE TABLE IF NOT EXISTS api_keys (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			name TEXT DEFAULT '',
+			key_hash TEXT NOT NULL DEFAULT '',
+			channel_id INTEGER DEFAULT 0,
+			status INTEGER DEFAULT 1,
+			last_used_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)`,
+		`CREATE TABLE IF NOT EXISTS api_keys (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			name TEXT DEFAULT '',
+			key_hash TEXT NOT NULL DEFAULT '',
+			channel_id INTEGER DEFAULT 0,
+			status INTEGER DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)`,
 		`CREATE TABLE IF NOT EXISTS configs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			key TEXT NOT NULL UNIQUE,
@@ -135,6 +161,9 @@ func migrate() error {
 	if err := ensureColumns(); err != nil {
 		return err
 	}
+	if err := backfillTaskKeys(); err != nil {
+		return err
+	}
 	if err := seedConfigs(); err != nil {
 		return err
 	}
@@ -159,6 +188,7 @@ func ensureColumns() error {
 		"ALTER TABLE generation_records ADD COLUMN error_msg TEXT DEFAULT ''",
 		"ALTER TABLE generation_records ADD COLUMN channel TEXT DEFAULT ''",
 		"ALTER TABLE users ADD COLUMN api_key TEXT DEFAULT ''",
+		"ALTER TABLE users ADD COLUMN oauth_username TEXT DEFAULT ''",
 		"ALTER TABLE generation_images ADD COLUMN storage_type TEXT DEFAULT ''",
 		"ALTER TABLE generation_images ADD COLUMN storage_path TEXT DEFAULT ''",
 		// redeem_codes.kind：'' = 旧版通用码（兑换/注册都可用）；'points' = 积分兑换码；'register' = 注册码
@@ -167,6 +197,9 @@ func ensureColumns() error {
 		"ALTER TABLE redeem_codes ADD COLUMN remark TEXT DEFAULT ''",
 		// users.last_read_notice_id：用户已读公告推进到的最新公告 id，用于导航红点
 		"ALTER TABLE users ADD COLUMN last_read_notice_id INTEGER NOT NULL DEFAULT 0",
+		// generation_records.task_key：每条创作记录的随机任务编号（8 位小写字母数字），
+		// 代替递增的 id 对外展示，避免用户看到顺序 ID。
+		"ALTER TABLE generation_records ADD COLUMN task_key TEXT DEFAULT ''",
 	}
 	for _, ddl := range adds {
 		if _, err := DB.Exec(ddl); err != nil {
@@ -279,7 +312,69 @@ func HashAPIKey(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// CreateAPIKey 为用户创建一条新的 API Key：name 用于区分用途，
+// channelID 绑定该 Key 固定使用的渠道编号（0 表示不绑定、
+// 调用时自动选普通渠道）。返回明文 Key 供页面一次性展示。
+func CreateAPIKey(userID int64, name string, channelID int) (string, error) {
+	key, err := GenerateAPIKey()
+	if err != nil {
+		return "", err
+	}
+	if _, err := DB.Exec("INSERT INTO api_keys(user_id, name, key_hash, channel_id) VALUES(?,?,?,?)",
+		userID, name, HashAPIKey(key), channelID); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+// ListAPIKeys 返回用户全部 API Key 的展示信息（不含明文）。
+func ListAPIKeys(userID int64) []map[string]interface{} {
+	keys := []map[string]interface{}{}
+	rows, err := DB.Query("SELECT id, name, key_hash, channel_id, status, created_at FROM api_keys WHERE user_id=? ORDER BY id DESC", userID)
+	if err != nil {
+		return keys
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var name, hash, createdAt string
+		var channelID, status int
+		if rows.Scan(&id, &name, &hash, &channelID, &status, &createdAt) == nil {
+			mask := ""
+			if len(hash) >= 8 {
+				mask = hash[:8] + "****"
+			} else if hash != "" {
+				mask = "****"
+			}
+			keys = append(keys, map[string]interface{}{
+				"ID":        id,
+				"Name":      name,
+				"Mask":      mask,
+				"ChannelID": channelID,
+				"Status":    status,
+				"CreatedAt": createdAt,
+			})
+		}
+	}
+	return keys
+}
+
+// DeleteAPIKey 删除用户的一条 API Key（仅限本人）。
+func DeleteAPIKey(userID, keyID int64) error {
+	_, err := DB.Exec("DELETE FROM api_keys WHERE id=? AND user_id=?", keyID, userID)
+	return err
+}
+
+// FindAPIKeyUser 按 Key 哈希查找使用该 Key 的用户与绑定渠道编号。
+// 返回 userID；未找到时 userID 为 0。channelID 为该 Key 创建时绑定的
+// 渠道编号（0 = 未绑定，调用时自动选普通渠道）。
+func FindAPIKeyUser(keyHash string) (userID int64, channelID int) {
+	DB.QueryRow("SELECT user_id, channel_id FROM api_keys WHERE key_hash=? AND status=1", keyHash).Scan(&userID, &channelID)
+	return
+}
+
 // SetAPIKey 为用户设置新的 API Key（保存哈希），返回明文 Key 供页面一次性展示。
+// 兼容旧版单 Key 方式：不写 api_keys 表（新用户请使用 CreateAPIKey）。
 func SetAPIKey(userID int64) (string, error) {
 	key, err := GenerateAPIKey()
 	if err != nil {
@@ -292,8 +387,55 @@ func SetAPIKey(userID int64) (string, error) {
 }
 
 // GetAPIKeyHash 返回用户当前的 API Key 哈希（为空表示未生成）。
+// 兼容旧版单 Key：仅查 users.api_key。
 func GetAPIKeyHash(userID int64) string {
 	var h string
 	DB.QueryRow("SELECT api_key FROM users WHERE id=?", userID).Scan(&h)
 	return h
+}
+
+// RandomTaskKey 生成一个 8 位小写字母数字随机串（a-z0-9，如 "d5ey63d7"），
+// 用作创作记录的对外任务编号，避免暴露递增的数据库 ID。
+func RandomTaskKey() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		// 兜底：用时间戳派生，保证非空
+		now := time.Now().UnixNano()
+		for i := range b {
+			b[i] = alphabet[int(now)%len(alphabet)]
+			now /= int64(len(alphabet))
+		}
+		return string(b)
+	}
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b)
+}
+
+// backfillTaskKeys 为历史数据中缺失 task_key 的记录补发随机编号
+// （幂等：只填充空值，重启可安全重跑）。
+func backfillTaskKeys() error {
+	rows, err := DB.Query("SELECT id FROM generation_records WHERE task_key IS NULL OR task_key = ''")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := DB.Exec("UPDATE generation_records SET task_key=? WHERE id=?", RandomTaskKey(), id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

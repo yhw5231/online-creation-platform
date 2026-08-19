@@ -1879,6 +1879,74 @@ func TestRecordsTotalCostExcludesFailed(t *testing.T) {
 	}
 }
 
+// TestRefundSystemLogAndUsersOAuth 验证：
+// 1) markTaskFailed 退回积分的同时写入系统日志（action=refund，points_delta>0）；
+// 2) 管理后台用户列表展示第三方绑定信息（provider/ID/用户名）。
+func TestRefundSystemLogAndUsersOAuth(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	// 页面渲染依赖全局模板
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+
+	res, _ := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id, oauth_username) VALUES(?,?,?,?,?,?,?,?)",
+		"oauthUser", "x", 100, "user", 1, "linuxdo", "12345", "linuxdo_nick")
+	uid, _ := res.LastInsertId()
+	res2, _ := models.DB.Exec("INSERT INTO generation_records(user_id, prompt, cost_points, status, task_key) VALUES(?,?,?,?,?)",
+		uid, "测试", 30, "processing", "abc12345")
+	rid, _ := res2.LastInsertId()
+
+	// 1) 退回积分 + 系统日志
+	markTaskFailed(rid, "模拟生成失败")
+	var points int64
+	models.DB.QueryRow("SELECT points FROM users WHERE id=?", uid).Scan(&points)
+	if points != 130 {
+		t.Errorf("points=%d, want 130 (100+30 refund)", points)
+	}
+	var cnt int
+	models.DB.QueryRow("SELECT COUNT(*) FROM system_logs WHERE user_id=? AND action='refund' AND points_delta>0", uid).Scan(&cnt)
+	if cnt != 1 {
+		t.Errorf("refund system log count=%d, want 1", cnt)
+	}
+	var detail string
+	models.DB.QueryRow("SELECT detail FROM system_logs WHERE user_id=? AND action='refund'", uid).Scan(&detail)
+	if !strings.Contains(detail, "生成失败退回") {
+		t.Errorf("refund detail=%q, want contains 生成失败退回", detail)
+	}
+
+	// 2) 管理后台用户列表显示第三方绑定
+	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	s, _ := store.Get(req, "session")
+	s.Values["userID"] = int64(1)
+	s.Values["username"] = "admin"
+	s.Values["role"] = "admin"
+	w0 := httptest.NewRecorder()
+	s.Save(req, w0)
+	// 需要 admin 用户存在（adminUsersHandler 不校验角色，直接查询即可）
+	models.DB.Exec("UPDATE users SET role='admin' WHERE username='oauthUser'")
+	w := httptest.NewRecorder()
+	adminUsersHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String()[:200])
+	}
+	body := w.Body.String()
+	for _, want := range []string{"linuxdo", "12345", "linuxdo_nick"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("admin users page missing %q", want)
+		}
+	}
+}
+
 // TestAdminRecordsReview 验证管理端创作记录审查页：展示所有用户的创作记录
 // 与生成图片（含配图统计），支持按状态筛选，并支持管理员删除任意记录
 // （连带清理归档图片行）。
@@ -2198,6 +2266,144 @@ func TestAPIV1Channels(t *testing.T) {
 	}
 	if resp.Channels[1].ID != 5 || resp.Channels[1].Index != 1 || !resp.Channels[1].NSFW {
 		t.Errorf("second channel = %+v", resp.Channels[1])
+	}
+}
+
+// TestMultiAPIKeysAndOpenAIEndpoint 验证：多命名 Key 的创建/列表/删除、
+// Key 渠道绑定、apiAuthMiddleware 走 api_keys 表，以及 OpenAI 兼容端点
+// /v1/images/generations 的请求校验与响应格式。
+func TestMultiAPIKeysAndOpenAIEndpoint(t *testing.T) {
+	if err := models.InitDB(filepath.Join(t.TempDir(), "apikeys.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+
+	// 渠道：id=2 主渠道（1k/2k）、id=5 NSFW 渠道（1k）
+	eps := []GenerationEndpoint{
+		{ID: 2, Name: "主渠道", APIURL: "https://a/v1", Model: "m1", Resolutions: []string{"1k", "2k"}, Models: []string{"m1"}},
+		{ID: 5, Name: "NSFW渠道", APIURL: "https://b/v1", NSFW: true, Resolutions: []string{"1k"}, Models: []string{"m2"}},
+	}
+	raw, _ := json.Marshal(eps)
+	models.SetConfig("generation_endpoints", string(raw))
+	models.SetConfig("generation_cost_points", "10")
+
+	res, _ := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status) VALUES(?,?,?,?,?)", "keyuser", "x", 100, "user", 1)
+	uid, _ := res.LastInsertId()
+
+	// 1) 创建两个命名 Key（绑定不同渠道）
+	keyA, err := models.CreateAPIKey(uid, "官网小程序", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := models.CreateAPIKey(uid, "脚本B", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyA == keyB {
+		t.Fatal("two keys should differ")
+	}
+	keys := models.ListAPIKeys(uid)
+	if len(keys) != 2 {
+		t.Fatalf("ListAPIKeys = %d, want 2", len(keys))
+	}
+	// Key 明文不应出现在列表中，掩码应形如 xxxxxxxx****
+	for _, k := range keys {
+		if k["Name"] != "官网小程序" && k["Name"] != "脚本B" {
+			t.Errorf("unexpected key name %v", k["Name"])
+		}
+		if m, _ := k["Mask"].(string); len(m) != 12 || !strings.HasSuffix(m, "****") {
+			t.Errorf("mask = %q", m)
+		}
+	}
+
+	// 2) apiAuthMiddleware：用新 Key 鉴权通过并带出绑定渠道
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/channels", nil)
+	req.Header.Set("Authorization", "Bearer "+keyA)
+	apiAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		userID, _ := r.Context().Value("userID").(int64)
+		channelID, _ := r.Context().Value("apiChannelID").(int)
+		if userID != uid || channelID != 2 {
+			t.Errorf("ctx userID=%d channelID=%d, want %d/2", userID, channelID, uid)
+		}
+	})(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auth status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 3) OpenAI 兼容端点：size 映射 + 渠道校验（请求经 apiAuthMiddleware 带出绑定渠道）
+	openAIReq := func(body string) *httptest.ResponseRecorder {
+		ww := httptest.NewRecorder()
+		rr := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body))
+		rr.Header.Set("Content-Type", "application/json")
+		rr.Header.Set("Authorization", "Bearer "+keyB)
+		apiAuthMiddleware(openAIImagesGenerationsHandler)(ww, rr)
+		return ww
+	}
+	// 非法 JSON
+	w := openAIReq(`{bad`)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("bad json status=%d", w.Code)
+	}
+	// prompt 缺失
+	w = openAIReq(`{"n":1}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "prompt") {
+		t.Errorf("empty prompt status=%d body=%s", w.Code, w.Body.String())
+	}
+	// NSFW 渠道不支持 2k（size=1792x1024 映射为 2k）
+	w = openAIReq(`{"prompt":"test","size":"1792x1024"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "分辨率") {
+		t.Errorf("unsupported resolution status=%d body=%s", w.Code, w.Body.String())
+	}
+	// 4) 删除 keyA（按名称定位），删除后该 Key 立即失效，keyB 仍可用
+	var keyAID int64
+	for _, k := range models.ListAPIKeys(uid) {
+		if k["Name"] == "官网小程序" {
+			keyAID = k["ID"].(int64)
+		}
+	}
+	if keyAID == 0 {
+		t.Fatal("keyA not found")
+	}
+	if err := models.DeleteAPIKey(uid, keyAID); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+keyA)
+	apiAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("deleted key should not authenticate")
+	})(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatal("deleted key still authenticates")
+	}
+	// keyB 仍可鉴权
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+keyB)
+	apiAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if got, _ := r.Context().Value("apiChannelID").(int); got != 5 {
+			t.Errorf("keyB channelID=%d, want 5", got)
+		}
+	})(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatal("keyB should still authenticate")
+	}
+	if len(models.ListAPIKeys(uid)) != 1 {
+		t.Errorf("after delete, keys = %d, want 1", len(models.ListAPIKeys(uid)))
+	}
+
+	// 5) openAISizeToParams 映射
+	for size, want := range map[string][2]string{
+		"1024x1024": {"1:1", "1k"},
+		"1792x1024": {"16:9", "2k"},
+		"1024x1792": {"9:16", "2k"},
+		"":          {"1:1", "1k"},
+	} {
+		r, s := openAISizeToParams(size)
+		if r != want[0] || s != want[1] {
+			t.Errorf("size %q -> %s/%s, want %s/%s", size, r, s, want[0], want[1])
+		}
 	}
 }
 

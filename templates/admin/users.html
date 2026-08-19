@@ -13,13 +13,19 @@
         <div class="table-responsive">
             <table class="table table-hover app-table mb-0">
                 <thead>
-                    <tr><th>ID</th><th>用户名</th><th>积分</th><th>角色</th><th>状态</th><th>注册时间</th><th class="text-end">操作</th></tr>
+                    <tr><th>ID</th><th>用户名</th><th>第三方绑定</th><th>积分</th><th>角色</th><th>状态</th><th>注册时间</th><th class="text-end">操作</th></tr>
                 </thead>
                 <tbody>
                     {{range .Users}}
                     <tr>
                         <td class="text-muted">{{.ID}}</td>
                         <td class="fw-semibold">{{.Username}}{{if eq $.CurrentID .ID}} <span class="badge text-bg-primary">我</span>{{end}}</td>
+                        <td class="small">
+                            {{if .OAuthProvider}}
+                                <span class="badge text-bg-info-subtle">{{.OAuthProvider}}</span>
+                                <div class="text-muted">ID: {{if .OAuthID}}{{.OAuthID}}{{else}}—{{end}}{{if .OAuthUsername}} · {{.OAuthUsername}}{{end}}</div>
+                            {{else}}<span class="text-muted">未绑定</span>{{end}}
+                        </td>
                         <td><span class="points-text">{{comma .Points}}</span></td>
                         <td>
                             {{if eq .Role "admin"}}<span class="badge text-bg-primary">管理员</span>
@@ -68,7 +74,7 @@
                         </td>
                     </tr>
                     {{else}}
-                    <tr><td colspan="7" class="text-center py-4 text-muted">暂无用户</td></tr>
+                    <tr><td colspan="8" class="text-center py-4 text-muted">暂无用户</td></tr>
                     {{end}}
                 </tbody>
             </table>

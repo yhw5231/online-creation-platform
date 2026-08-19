@@ -659,7 +659,7 @@
       } else {
         var imgs = (t.Images && t.Images.length) ? t.Images : (t.ImageURL ? [t.ImageURL] : []);
         html += '<div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-2">';
-        html += '<div>' + taskBadge(t.Status) + ' <span class="text-muted small">#' + t.ID + ' · ' + (t.N || 1) + ' 张</span></div>';
+        html += '<div>' + taskBadge(t.Status) + ' <span class="text-muted small">#' + (t.TaskKey || t.ID) + ' · ' + (t.N || 1) + ' 张</span></div>';
         html += '<a href="/records" class="btn btn-sm btn-outline-secondary">查看创作记录</a>';
         html += '</div>';
         if (!imgs.length) {
@@ -691,12 +691,12 @@
       }
       var html = '';
       list.forEach(function (t) {
-        html += '<div class="recent-task d-flex align-items-start gap-3 py-2 px-2 rounded" data-task-id="' + esc(t.ID) + '" data-task-status="' + esc(t.Status) + '">';
+        html += '<div class="recent-task d-flex align-items-start gap-3 py-2 px-2 rounded" data-task-id="' + esc(t.TaskKey || t.ID) + '" data-task-status="' + esc(t.Status) + '">';
         html += '<div class="recent-task-thumb flex-shrink-0">' + taskThumb(t) + '</div>';
         html += '<div class="flex-grow-1 min-w-0">';
         html += '<p class="record-prompt mb-1" title="' + esc(t.Prompt) + '">' + esc(t.Prompt) + '</p>';
         html += '<div class="d-flex align-items-center gap-2 flex-wrap">';
-        html += '<span class="text-muted small">#' + t.ID + ' · ' + esc(t.CreatedAt) + ' · ×' + (t.N || 1) + '</span>';
+        html += '<span class="text-muted small">#' + (t.TaskKey || t.ID) + ' · ' + esc(t.CreatedAt) + ' · ×' + (t.N || 1) + '</span>';
         html += taskBadge(t.Status);
         html += '</div>';
         if (t.Status === 'failed') {
@@ -740,7 +740,7 @@
       }).then(function (data) {
         if (taskDetailBox && activeTaskId && data.tasks) {
           data.tasks.forEach(function (t) {
-            if (String(t.ID) === activeTaskId) renderTaskDetail(t);
+            if ((t.TaskKey || String(t.ID)) === activeTaskId) renderTaskDetail(t);
           });
         }
         if (data.recent) renderRecentTasks(data.recent);
@@ -888,7 +888,9 @@
   // 缓存到浏览器，服务器本地文件被自动清理后，用户仍可从缓存查看/下载。
   // 配置了外部存储的记录会显示"备用下载"按钮，使用备用地址下载。
   (function () {
-    var cacheKeyRE = /\d+-\d+/;
+    // 缓存键 = 任务随机编号-图片序号（如 d5ey63d7-0），
+    // 任务编号使用随机值，图片序号为记录内的位置
+    var cacheKeyRE = /[a-z0-9]+-\d+/;
     var imgs = document.querySelectorAll('img[data-cache-key]');
     if (!imgs.length) return;
 

@@ -62,13 +62,9 @@
             <div class="card-body p-4">
                 <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
                     <div>
-                        <h6 class="fw-bold mb-1">API Key</h6>
+                        <h6 class="fw-bold mb-1">API Key（OpenAI 兼容接口）</h6>
                         <div class="text-muted small">
-                            {{if .HasAPIKey}}
-                                当前 Key：<code>{{.ApiKeyMask}}</code>
-                            {{else}}
-                                尚未生成 API Key
-                            {{end}}
+                            可生成多个命名 Key，每个 Key 固定绑定一个渠道；调用 <code>POST /v1/images/generations</code>（OpenAI 格式）生成图片，积分规则与网页一致。
                         </div>
                         {{if .NewAPIKey}}
                             <div class="alert alert-warning alert-dismissible fade show mt-2 py-2 small" role="alert">
@@ -77,17 +73,59 @@
                             </div>
                         {{end}}
                     </div>
-                    <form method="post" action="/api/key/generate">
-                        <input type="hidden" name="_csrf" value="{{.CSRF}}">
-                        <button type="submit" class="btn btn-outline-primary btn-sm">
-                            {{if .HasAPIKey}}刷新 Key{{else}}生成 API Key{{end}}
-                        </button>
-                    </form>
+                    <a href="/api/docs" class="text-primary small">查看文档 ›</a>
                 </div>
-                <div class="mt-2 text-muted small">
-                    <span>使用 <code>Authorization: Bearer <key></code> 调用 <code>/api/v1/generate</code> 生成图片，积分规则与网页一致。</span>
-                    <a href="/api/docs" class="text-primary ms-1">查看文档 ›</a>
+
+                {{if .APIKeys}}
+                <div class="table-responsive mt-3">
+                    <table class="table table-sm align-middle mb-2">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th>名称</th><th>渠道</th><th>Key</th><th>创建时间</th><th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {{range .APIKeys}}
+                            <tr>
+                                <td class="fw-semibold">{{.Name}}</td>
+                                <td class="small">{{.ChannelName}}</td>
+                                <td><code class="small">{{.Mask}}</code></td>
+                                <td class="text-muted small">{{.CreatedAt}}</td>
+                                <td class="text-end">
+                                    <form method="post" action="/api/keys/delete" class="d-inline" data-submit="loading">
+                                        <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                                        <input type="hidden" name="id" value="{{.ID}}">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger btn-loading" data-confirm="确定要删除该 API Key 吗？删除后此 Key 立即失效。">删除</button>
+                                    </form>
+                                </td>
+                            </tr>
+                        {{end}}
+                        </tbody>
+                    </table>
                 </div>
+                {{else}}
+                    <div class="text-muted small mt-3">尚未生成 API Key</div>
+                {{end}}
+
+                <hr class="my-3">
+                <div class="small fw-semibold mb-2">生成新 Key</div>
+                <form method="post" action="/api/keys/create" class="row g-2 align-items-end">
+                    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">名称（用于区分，必填）</label>
+                        <input type="text" name="name" class="form-control form-control-sm" placeholder="如：官网小程序" maxlength="30" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">绑定渠道（~OpenAI 格式不含渠道，需在 Key 上指定）</label>
+                        <select name="channel" class="form-select form-select-sm" required>
+                            {{range .KeyChannels}}<option value="{{.ID}}">{{.ID}} · {{.Name}}</option>{{end}}
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <button type="submit" class="btn btn-outline-primary btn-sm w-100">生成 API Key</button>
+                    </div>
+                </form>
+                <div class="text-muted small mt-2">Key 明文仅显示一次，请立即复制保存；使用 <code>Authorization: Bearer &lt;key&gt;</code> 调用 <code>/v1/images/generations</code>。</div>
             </div>
         </div>
 

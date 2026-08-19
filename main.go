@@ -17,6 +17,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -518,10 +519,12 @@ func main() {
 	http.HandleFunc("/robots.txt", robotsHandler)
 
 	// API Key 管理（网页登录 + CSRF）与外部调用接口（Key 认证）
-	http.HandleFunc("/api/key/generate", authMiddleware(apiKeyGenerateHandler))
+	http.HandleFunc("/api/keys/create", authMiddleware(apiKeyCreateHandler))
+	http.HandleFunc("/api/keys/delete", authMiddleware(apiKeyDeleteHandler))
 	http.HandleFunc("/api/v1/generate", apiAuthMiddleware(apiGenerateHandler))
 	http.HandleFunc("/api/v1/status", apiAuthMiddleware(apiStatusHandler))
 	http.HandleFunc("/api/v1/channels", apiAuthMiddleware(apiChannelsHandler))
+	http.HandleFunc("/v1/images/generations", apiAuthMiddleware(openAIImagesGenerationsHandler))
 	http.HandleFunc("/api/docs", apiDocsHandler)
 
 	addr := os.Getenv("PORT")
@@ -1415,6 +1418,7 @@ var systemLogActions = map[string]string{
 	"create":       "创作",
 	"redeem":       "兑换",
 	"api":          "API 调用",
+	"refund":       "积分退回",
 	"admin_rename": "管理员操作",
 }
 
@@ -1488,15 +1492,34 @@ func profileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 用户 API Key：数据库只存哈希，页面展示掩码；新生成的明文通过
-	// session flash 传递一次，渲染后即清除
-	apiKeyHash := models.GetAPIKeyHash(uid)
-	hasKey := apiKeyHash != ""
-	mask := ""
-	if len(apiKeyHash) >= 8 {
-		mask = apiKeyHash[:8] + "****"
-	} else if hasKey {
-		mask = "****"
+	// 多 Key 列表（命名 + 渠道绑定）：渠道名从当前渠道配置解析
+	apiKeys := models.ListAPIKeys(uid)
+	keyRows := []map[string]interface{}{}
+	eps := loadEndpoints()
+	chanNameOf := func(cid int) string {
+		if cid == 0 {
+			return "自动选择（普通渠道）"
+		}
+		for _, ep := range eps {
+			if ep.ID == cid {
+				name := ep.Name
+				if ep.NSFW {
+					name += "（NSFW）"
+				}
+				return name
+			}
+		}
+		return fmt.Sprintf("渠道%d（已失效）", cid)
+	}
+	for _, k := range apiKeys {
+		keyRows = append(keyRows, map[string]interface{}{
+			"ID":          k["ID"],
+			"Name":        k["Name"],
+			"Mask":        k["Mask"],
+			"ChannelID":   k["ChannelID"],
+			"ChannelName": chanNameOf(k["ChannelID"].(int)),
+			"CreatedAt":   localTime(k["CreatedAt"].(string)),
+		})
 	}
 	var newKey string
 	if sess, _ := store.Get(r, "session"); sess != nil {
@@ -1519,8 +1542,8 @@ func profileHandler(w http.ResponseWriter, r *http.Request) {
 		"LastSign":     lastSign,
 		"RecentRecs":   recentRecords,
 		"RecentPts":    recentPoints,
-		"HasAPIKey":    hasKey,
-		"ApiKeyMask":   mask,
+		"APIKeys":      keyRows,
+		"KeyChannels":  allChannels(),
 		"NewAPIKey":    newKey,
 		"OAuthEnabled": oauthEnabled(),
 		"OAuthProvider": func() string {
@@ -1600,17 +1623,28 @@ func createPage(w http.ResponseWriter, r *http.Request, extra map[string]interfa
 		data["LastPrompt"] = p
 	}
 	uid, _, _ := currentUser(r)
-	// 异步任务：?task=<id> 表示刚提交的任务，展示进度卡并交给前端轮询
+	// 异步任务：?task=<task_key> 表示刚提交的任务，展示进度卡并交给前端轮询。
+	// 使用随机任务编号而非自增 ID，避免在任何 URL / 页面文本中暴露顺序 ID。
 	if t := strings.TrimSpace(r.URL.Query().Get("task")); t != "" {
+		var st, taskKey string
+		var rid int64
+		// 兼容历史链接里的数字 ID（task=123），新链接一律使用 task_key
 		if id, err := strconv.ParseInt(t, 10, 64); err == nil && id > 0 {
-			var st string
-			if err := models.DB.QueryRow("SELECT status FROM generation_records WHERE id=? AND user_id=?", id, uid).Scan(&st); err == nil {
-				data["TaskID"] = id
+			if err := models.DB.QueryRow("SELECT id, status, task_key FROM generation_records WHERE id=? AND user_id=?", id, uid).Scan(&rid, &st, &taskKey); err == nil {
+				data["TaskID"] = rid
 				if st == "pending" {
 					st = "processing"
 				}
 				data["TaskStatus"] = st
+				data["TaskKey"] = taskKey
 			}
+		} else if err := models.DB.QueryRow("SELECT id, status FROM generation_records WHERE task_key=? AND user_id=?", t, uid).Scan(&rid, &st); err == nil {
+			data["TaskID"] = rid
+			if st == "pending" {
+				st = "processing"
+			}
+			data["TaskStatus"] = st
+			data["TaskKey"] = t
 		}
 	}
 	// 渠道下拉：展示全部渠道（"编号 · 渠道名"，NSFW 渠道带标注）；
@@ -1842,12 +1876,15 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	if chanModel == "" {
 		chanModel = models.GetConfigOr("generation_model", "grok-imagine-image-lite")
 	}
-	res, err = models.DB.Exec("INSERT INTO generation_records(user_id, prompt, model, n, aspect_ratio, resolution, response_format, cost_points, status, nsfw, channel) VALUES(?,?,?,?,?,?,?,?,'processing',?,?)",
-		userID, lastPrompt, chanModel, n, lastRatio, lastResolution, lastFormat, cost, nsfwFlag, selectedEp.Name)
+	// 生成随机任务编号（对外展示，不暴露自增 ID）
+	taskKey := models.RandomTaskKey()
+	res, err = models.DB.Exec("INSERT INTO generation_records(user_id, prompt, model, n, aspect_ratio, resolution, response_format, cost_points, status, nsfw, channel, task_key) VALUES(?,?,?,?,?,?,?,?,'processing',?,?,?)",
+		userID, lastPrompt, chanModel, n, lastRatio, lastResolution, lastFormat, cost, nsfwFlag, selectedEp.Name, taskKey)
 	if err != nil {
 		// 扣款成功但记录落库失败：立即退回积分，避免"扣了分却没记录"
 		models.DB.Exec("UPDATE users SET points = points + ? WHERE id=?", cost, userID)
 		logPoints(userID, int64(cost), "生成任务创建失败，积分退回")
+		systemLog(r, userID, username, "refund", "创作任务创建失败，积分退回", int64(cost))
 		createPage(w, r, map[string]interface{}{
 			"Error":          "任务创建失败，积分已退回，请重试",
 			"LastPrompt":     lastPrompt,
@@ -1860,12 +1897,12 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	rid, _ := res.LastInsertId()
 	logPoints(userID, -int64(cost), "AI 图片创作消耗")
-	systemLog(r, userID, username, "create", fmt.Sprintf("创作生成 %d 张（%s），任务 #%d", n, chanModel, rid), -int64(cost))
+	systemLog(r, userID, username, "create", fmt.Sprintf("创作生成 %d 张（%s），任务 #%s", n, chanModel, taskKey), -int64(cost))
 
 	// 入队：worker 异步生成，前端轮询 /generate/status 同步任务状态
 	taskQueue <- genTask{recordID: rid}
 
-	flashRedirect(w, r, fmt.Sprintf("/create?task=%d", rid), "生成任务已提交，正在后台生成，请稍候…")
+	flashRedirect(w, r, fmt.Sprintf("/create?task=%s", taskKey), "生成任务已提交，正在后台生成，请稍候…")
 }
 
 // ------- 多接口渠道（普通 / NSFW） -------
@@ -2092,7 +2129,7 @@ func containsString(list []string, v string) bool {
 // 区域与 /generate/status 轮询响应共用。
 func recentTasks(userID int64, limit int) []map[string]interface{} {
 	list := []map[string]interface{}{}
-	rows, err := models.DB.Query(`SELECT id, prompt, n, status, image_url, error_msg, created_at
+	rows, err := models.DB.Query(`SELECT id, task_key, prompt, n, status, image_url, error_msg, created_at
 		FROM generation_records WHERE user_id=? ORDER BY id DESC LIMIT ?`, userID, limit)
 	if err != nil {
 		return list
@@ -2100,12 +2137,13 @@ func recentTasks(userID int64, limit int) []map[string]interface{} {
 	defer rows.Close()
 	for rows.Next() {
 		var id int64
-		var prompt string
+		var taskKey, prompt string
 		var n int
 		var status, imageURL, errMsg, createdAt string
-		if rows.Scan(&id, &prompt, &n, &status, &imageURL, &errMsg, &createdAt) == nil {
+		if rows.Scan(&id, &taskKey, &prompt, &n, &status, &imageURL, &errMsg, &createdAt) == nil {
 			list = append(list, map[string]interface{}{
 				"ID":        id,
+				"TaskKey":   taskKey,
 				"Prompt":    truncateRunes(prompt, 60),
 				"N":         n,
 				"Status":    status,
@@ -2324,6 +2362,10 @@ func markTaskFailed(recordID int64, msg string) {
 	}
 	mustExec("UPDATE users SET points = points + ? WHERE id=?", cost, userID)
 	logPoints(userID, cost, "生成失败，积分退回")
+	// 系统日志同样登记退回记录（创作/API 生成失败时，管理后台应能看到积分退回）
+	var uname string
+	models.DB.QueryRow("SELECT username FROM users WHERE id=?", userID).Scan(&uname)
+	systemLog(nil, userID, uname, "refund", "生成失败退回：任务 #"+strconv.FormatInt(recordID, 10), cost)
 }
 
 // cleanUpTask 执行一次自动清理：同时受"保留天数"与"磁盘上限"两个规则
@@ -2499,28 +2541,41 @@ func mustExec(q string, args ...interface{}) sql.Result {
 
 // generateStatusHandler 是异步任务的状态轮询接口：传 ids 返回对应任务详情，
 // 同时附带最近 3 条任务，一次请求同时刷新创作页的进度卡与最近任务列表。
+// ids 可以是 task_key 或数字 ID，兼容新旧格式。
 func generateStatusHandler(w http.ResponseWriter, r *http.Request) {
 	uid, _, _ := currentUser(r)
-	ids := []int64{}
-	for _, s := range strings.Split(r.URL.Query().Get("ids"), ",") {
-		if id, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil && id > 0 {
-			ids = append(ids, id)
-		}
-		if len(ids) >= 20 {
-			break
-		}
+	rawIDs := strings.Split(r.URL.Query().Get("ids"), ",")
+	if len(rawIDs) > 20 {
+		rawIDs = rawIDs[:20]
 	}
 	tasks := []map[string]interface{}{}
-	for _, id := range ids {
-		var prompt, status, errMsg, createdAt, imageURL string
-		var n int
-		if err := models.DB.QueryRow(`SELECT prompt, n, status, image_url, error_msg, created_at
-			FROM generation_records WHERE id=? AND user_id=?`, id, uid).
-			Scan(&prompt, &n, &status, &imageURL, &errMsg, &createdAt); err != nil {
+	for _, s := range rawIDs {
+		s = strings.TrimSpace(s)
+		if s == "" {
 			continue
 		}
+		var prompt, status, errMsg, createdAt, imageURL, taskKey string
+		var n int
+		// 先尝试按数字 ID 查询（兼容旧版），再按 task_key 查询
+		var err error
+		if id, parseErr := strconv.ParseInt(s, 10, 64); parseErr == nil && id > 0 {
+			err = models.DB.QueryRow(`SELECT prompt, n, status, image_url, error_msg, created_at, task_key
+				FROM generation_records WHERE id=? AND user_id=?`, id, uid).
+				Scan(&prompt, &n, &status, &imageURL, &errMsg, &createdAt, &taskKey)
+		} else {
+			err = models.DB.QueryRow(`SELECT prompt, n, status, image_url, error_msg, created_at, task_key
+				FROM generation_records WHERE task_key=? AND user_id=?`, s, uid).
+				Scan(&prompt, &n, &status, &imageURL, &errMsg, &createdAt, &taskKey)
+		}
+		if err != nil {
+			continue
+		}
+		// 用 task_key 反查 id
+		var id int64
+		models.DB.QueryRow("SELECT id FROM generation_records WHERE task_key=? AND user_id=?", taskKey, uid).Scan(&id)
 		tasks = append(tasks, map[string]interface{}{
 			"ID":        id,
+			"TaskKey":   taskKey,
 			"Prompt":    prompt,
 			"N":         n,
 			"Status":    status,
@@ -2570,7 +2625,7 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 	if page > totalPages {
 		page = totalPages
 	}
-	rows, err := models.DB.Query("SELECT id, prompt, model, n, aspect_ratio, resolution, cost_points, status, image_url, error_msg, channel, created_at FROM generation_records "+base+" ORDER BY id DESC LIMIT ? OFFSET ?",
+	rows, err := models.DB.Query("SELECT id, task_key, prompt, model, n, aspect_ratio, resolution, cost_points, status, image_url, error_msg, channel, created_at FROM generation_records "+base+" ORDER BY id DESC LIMIT ? OFFSET ?",
 		append(args, perPage, (page-1)*perPage)...)
 	if err != nil {
 		http.Error(w, "查询失败", http.StatusInternalServerError)
@@ -2580,10 +2635,11 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 	recs := []map[string]interface{}{}
 	for rows.Next() {
 		var rec models.GenerationRecord
-		var errMsg, channel string
-		if err := rows.Scan(&rec.ID, &rec.Prompt, &rec.Model, &rec.N, &rec.AspectRatio, &rec.Resolution, &rec.CostPoints, &rec.Status, &rec.ImageURL, &errMsg, &channel, &rec.CreatedAt); err == nil {
+		var errMsg, channel, taskKey string
+		if err := rows.Scan(&rec.ID, &taskKey, &rec.Prompt, &rec.Model, &rec.N, &rec.AspectRatio, &rec.Resolution, &rec.CostPoints, &rec.Status, &rec.ImageURL, &errMsg, &channel, &rec.CreatedAt); err == nil {
 			recs = append(recs, map[string]interface{}{
 				"ID":          rec.ID,
+				"TaskKey":     taskKey,
 				"Prompt":      rec.Prompt,
 				"Model":       rec.Model,
 				"N":           rec.N,
@@ -2710,9 +2766,15 @@ func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID, _, _ := currentUser(r)
-	id := r.FormValue("id")
-	paths, remoteRefs := collectRecordAssets(id)
-	result, err := models.DB.Exec("DELETE FROM generation_records WHERE id=? AND user_id=?", id, userID)
+	rawID := r.FormValue("id")
+	// 兼容数字 ID（历史书签）和 task_key（新格式）
+	recordID, err := resolveRecordID(rawID, userID)
+	if err != nil {
+		http.Error(w, "记录不存在", http.StatusNotFound)
+		return
+	}
+	paths, remoteRefs := collectRecordAssets(strconv.FormatInt(recordID, 10))
+	result, err := models.DB.Exec("DELETE FROM generation_records WHERE id=? AND user_id=?", recordID, userID)
 	if err != nil {
 		http.Error(w, "删除失败", http.StatusInternalServerError)
 		return
@@ -2721,7 +2783,7 @@ func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "记录不存在", http.StatusNotFound)
 		return
 	}
-	removeRecordAssets(id, paths, remoteRefs)
+	removeRecordAssets(strconv.FormatInt(recordID, 10), paths, remoteRefs)
 	// 返回来源页，尽量保留分页与搜索条件
 	target := "/records"
 	if ref := r.Referer(); ref != "" {
@@ -2788,7 +2850,7 @@ func adminRecordsHandler(w http.ResponseWriter, r *http.Request) {
 	if page > totalPages {
 		page = totalPages
 	}
-	rows, err := models.DB.Query("SELECT g.id, g.prompt, g.model, g.n, g.aspect_ratio, g.resolution, g.cost_points, g.status, g.image_url, g.error_msg, g.channel, g.created_at, COALESCE(u.username,'') FROM "+from+clause+" ORDER BY g.id DESC LIMIT ? OFFSET ?",
+	rows, err := models.DB.Query("SELECT g.id, g.task_key, g.prompt, g.model, g.n, g.aspect_ratio, g.resolution, g.cost_points, g.status, g.image_url, g.error_msg, g.channel, g.created_at, COALESCE(u.username,'') FROM "+from+clause+" ORDER BY g.id DESC LIMIT ? OFFSET ?",
 		append(args, perPage, (page-1)*perPage)...)
 	if err != nil {
 		http.Error(w, "查询失败", http.StatusInternalServerError)
@@ -2798,10 +2860,11 @@ func adminRecordsHandler(w http.ResponseWriter, r *http.Request) {
 	recs := []map[string]interface{}{}
 	for rows.Next() {
 		var rec models.GenerationRecord
-		var errMsg, channel, username string
-		if err := rows.Scan(&rec.ID, &rec.Prompt, &rec.Model, &rec.N, &rec.AspectRatio, &rec.Resolution, &rec.CostPoints, &rec.Status, &rec.ImageURL, &errMsg, &channel, &rec.CreatedAt, &username); err == nil {
+		var errMsg, channel, username, taskKey string
+		if err := rows.Scan(&rec.ID, &taskKey, &rec.Prompt, &rec.Model, &rec.N, &rec.AspectRatio, &rec.Resolution, &rec.CostPoints, &rec.Status, &rec.ImageURL, &errMsg, &channel, &rec.CreatedAt, &username); err == nil {
 			recs = append(recs, map[string]interface{}{
 				"ID":          rec.ID,
+				"TaskKey":     taskKey,
 				"Prompt":      rec.Prompt,
 				"Model":       rec.Model,
 				"N":           rec.N,
@@ -2910,9 +2973,16 @@ func adminRecordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	adminID, adminName, _ := currentUser(r)
-	id := r.FormValue("id")
+	rawID := r.FormValue("id")
+	// 兼容数字 ID（历史书签）和 task_key（新格式）
+	recordID, err := resolveRecordID(rawID, 0)
+	if err != nil {
+		http.Error(w, "记录不存在", http.StatusNotFound)
+		return
+	}
+	id := strconv.FormatInt(recordID, 10)
 	paths, remoteRefs := collectRecordAssets(id)
-	result, err := models.DB.Exec("DELETE FROM generation_records WHERE id=?", id)
+	result, err := models.DB.Exec("DELETE FROM generation_records WHERE id=?", recordID)
 	if err != nil {
 		http.Error(w, "删除失败", http.StatusInternalServerError)
 		return
@@ -2924,6 +2994,27 @@ func adminRecordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	removeRecordAssets(id, paths, remoteRefs)
 	log.Printf("admin deleted record: id=%s admin=%s(%d)", id, adminName, adminID)
 	flashRedirect(w, r, adminRecordsBack(r), "已删除该创作记录")
+}
+
+// resolveRecordID 把前端提交的任务标识解析为记录 ID：
+// 优先按 task_key 查（新格式，形如 "d5ey63d7"），
+// 无法匹配时回退为数字 ID 直通（兼容历史表单/书签）。
+// userID 为 0 时不限制归属（管理端使用）。
+func resolveRecordID(raw string, userID int64) (int64, error) {
+	if raw == "" {
+		return 0, fmt.Errorf("empty id")
+	}
+	// task_key 是 8 位小写字母数字，纯数字必然是数字 ID
+	if id, err := strconv.ParseInt(raw, 10, 64); err == nil && id > 0 {
+		return id, nil
+	}
+	var id int64
+	if userID == 0 {
+		err := models.DB.QueryRow("SELECT id FROM generation_records WHERE task_key=?", raw).Scan(&id)
+		return id, err
+	}
+	err := models.DB.QueryRow("SELECT id FROM generation_records WHERE task_key=? AND user_id=?", raw, userID).Scan(&id)
+	return id, err
 }
 
 // renderRedeem 渲染积分兑换页。错误（msgType=="error"）以红色文字显示在兑换码
@@ -3362,7 +3453,7 @@ func adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 	if page > totalPages {
 		page = totalPages
 	}
-	rows, err := models.DB.Query("SELECT id, username, points, role, status, created_at "+clause+" ORDER BY id DESC LIMIT ? OFFSET ?",
+	rows, err := models.DB.Query("SELECT id, username, points, role, status, created_at, oauth_provider, oauth_id, oauth_username "+clause+" ORDER BY id DESC LIMIT ? OFFSET ?",
 		append(args, perPage, (page-1)*perPage)...)
 	if err != nil {
 		http.Error(w, "查询失败", http.StatusInternalServerError)
@@ -3370,24 +3461,30 @@ func adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	type userRow struct {
-		ID        int64
-		Username  string
-		Points    int64
-		Role      string
-		Status    int
-		CreatedAt string
+		ID            int64
+		Username      string
+		Points        int64
+		Role          string
+		Status        int
+		CreatedAt     string
+		OAuthProvider string
+		OAuthID       string
+		OAuthUsername string
 	}
 	users := []userRow{}
 	for rows.Next() {
 		var u models.User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Points, &u.Role, &u.Status, &u.CreatedAt); err == nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Points, &u.Role, &u.Status, &u.CreatedAt, &u.OAuthProvider, &u.OAuthID, &u.OAuthUsername); err == nil {
 			users = append(users, userRow{
-				ID:        u.ID,
-				Username:  u.Username,
-				Points:    u.Points,
-				Role:      u.Role,
-				Status:    u.Status,
-				CreatedAt: u.CreatedAt.In(beijingTZ).Format("2006-01-02 15:04:05"),
+				ID:            u.ID,
+				Username:      u.Username,
+				Points:        u.Points,
+				Role:          u.Role,
+				Status:        u.Status,
+				CreatedAt:     u.CreatedAt.In(beijingTZ).Format("2006-01-02 15:04:05"),
+				OAuthProvider: u.OAuthProvider,
+				OAuthID:       u.OAuthID,
+				OAuthUsername: u.OAuthUsername,
 			})
 		}
 	}
@@ -3826,7 +3923,7 @@ func adminSystemLogsHandler(w http.ResponseWriter, r *http.Request) {
 	// 行为筛选下拉：固定顺序展示常见行为，再补出现过的其它行为（去重）
 	actionOpts := []map[string]interface{}{}
 	seen := map[string]bool{}
-	for _, key := range []string{"login", "login_fail", "logout", "register", "checkin", "create", "redeem", "api"} {
+	for _, key := range []string{"login", "login_fail", "logout", "register", "checkin", "create", "redeem", "api", "refund"} {
 		if label, ok := systemLogActions[key]; ok {
 			actionOpts = append(actionOpts, map[string]interface{}{"Value": key, "Label": label})
 			seen[key] = true
@@ -4818,6 +4915,7 @@ func isUnreachableHost(host string) bool {
 // saveImageLocally downloads an upstream media URL (or decodes base64) using
 // the given channel client and stores it under data/images/, returning the
 // local URL path on success ("" on failure).
+// The file is named as <unixnano>_<hex6><ext> (e.g. "1750000000000_ab12cd.png").
 func saveImageLocally(imageURL string, client *services.GrokClient) (string, error) {
 	if imageURL == "" {
 		return "", fmt.Errorf("empty image url")
@@ -5122,7 +5220,7 @@ func linuxdoCallbackHandler(w http.ResponseWriter, r *http.Request) {
 			flashRedirect(w, r, "/profile", "已绑定该 Linux.do 账号")
 			return
 		}
-		if _, err := models.DB.Exec("UPDATE users SET oauth_provider='linuxdo', oauth_id=? WHERE id=?", strconv.FormatInt(userID, 10), uid); err != nil {
+		if _, err := models.DB.Exec("UPDATE users SET oauth_provider='linuxdo', oauth_id=?, oauth_username=? WHERE id=?", strconv.FormatInt(userID, 10), username, uid); err != nil {
 			http.Error(w, "绑定失败，请稍后重试", http.StatusInternalServerError)
 			return
 		}
@@ -5251,8 +5349,8 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "系统繁忙，请重试", http.StatusInternalServerError)
 				return
 			}
-			res, err := tx.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id) VALUES(?,?,?,?,?,?,?)",
-				username, string(hashed), initPoints, "user", 1, "linuxdo", strconv.FormatInt(pendingUID, 10))
+			res, err := tx.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id, oauth_username) VALUES(?,?,?,?,?,?,?,?)",
+				username, string(hashed), initPoints, "user", 1, "linuxdo", strconv.FormatInt(pendingUID, 10), pendingName)
 			if err != nil {
 				tx.Rollback()
 				oauthFail("用户名已存在或输入有误", "", username)
@@ -5283,8 +5381,8 @@ func linuxdoSetupHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			res, err := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id) VALUES(?,?,?,?,?,?,?)",
-				username, string(hashed), initPoints, "user", 1, "linuxdo", strconv.FormatInt(pendingUID, 10))
+			res, err := models.DB.Exec("INSERT INTO users(username, password_hash, points, role, status, oauth_provider, oauth_id, oauth_username) VALUES(?,?,?,?,?,?,?,?)",
+				username, string(hashed), initPoints, "user", 1, "linuxdo", strconv.FormatInt(pendingUID, 10), pendingName)
 			if err != nil {
 				oauthFail("用户名已存在或输入有误", "", username)
 				return
@@ -5726,20 +5824,30 @@ func apiAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		hashed := models.HashAPIKey(key)
+		// 新格式：api_keys 表（支持多个命名 Key），可带渠道绑定
 		var userID int64
-		var status int
-		err := models.DB.QueryRow("SELECT id, status FROM users WHERE api_key=? AND status=1", hashed).Scan(&userID, &status)
-		if err != nil || status != 1 {
-			http.Error(w, `{"ok":false,"error":"invalid api key"}`, http.StatusUnauthorized)
-			return
+		var channelID int
+		userID, channelID = models.FindAPIKeyUser(hashed)
+		if userID == 0 {
+			// 兼容旧版单 Key（users.api_key 字段）
+			var status int
+			err := models.DB.QueryRow("SELECT id, status FROM users WHERE api_key=? AND status=1", hashed).Scan(&userID, &status)
+			if err != nil || status != 1 {
+				http.Error(w, `{"ok":false,"error":"invalid api key"}`, http.StatusUnauthorized)
+				return
+			}
 		}
 		ctx := context.WithValue(r.Context(), "userID", userID)
+		ctx = context.WithValue(ctx, "apiChannelID", channelID)
 		next(w, r.WithContext(ctx))
 	}
 }
 
-// ------------------------- 生成 / 刷新 API Key（网页登录 + CSRF） -------------------------
-func apiKeyGenerateHandler(w http.ResponseWriter, r *http.Request) {
+// ------------------------- API Key 管理（网页登录 + CSRF） -------------------------
+// 支持生成多个命名 Key：name 用于区分用途，channel 绑定该 Key 固定使用的
+// 渠道编号（OpenAI 兼容接口 /v1/images/generations 不携带渠道参数，
+// 因此"用哪个渠道"在创建 Key 时确定）。
+func apiKeyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -5753,7 +5861,34 @@ func apiKeyGenerateHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	key, err := models.SetAPIKey(userID)
+	name := strings.TrimSpace(r.FormValue("name"))
+	if name == "" {
+		flashRedirect(w, r, "/profile", "请为 API Key 填写名称（用于区分用途）")
+		return
+	}
+	if utf8.RuneCountInString(name) > 30 {
+		flashRedirect(w, r, "/profile", "API Key 名称最长 30 字")
+		return
+	}
+	channelStr := strings.TrimSpace(r.FormValue("channel"))
+	channelID := 0
+	if channelStr != "" {
+		channelID = atoiDefault(channelStr, 0)
+		// 校验渠道编号存在（不存在的编号不允许创建，避免 Key 绑定无效渠道）
+		eps := loadEndpoints()
+		valid := false
+		for _, ep := range eps {
+			if ep.ID == channelID {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			flashRedirect(w, r, "/profile", "所选渠道不存在，请重新选择")
+			return
+		}
+	}
+	key, err := models.CreateAPIKey(userID, name, channelID)
 	if err != nil {
 		http.Error(w, "生成失败", http.StatusInternalServerError)
 		return
@@ -5761,7 +5896,34 @@ func apiKeyGenerateHandler(w http.ResponseWriter, r *http.Request) {
 	sess, _ := store.Get(r, "session")
 	sess.Values["new_api_key"] = key
 	sess.Save(r, w)
-	flashRedirect(w, r, "/profile", "新 API Key 已生成，请立即复制保存（仅显示一次）")
+	flashRedirect(w, r, "/profile", "新 API Key「"+name+"」已生成，请立即复制保存（仅显示一次）")
+}
+
+// apiKeyDeleteHandler 删除用户的一条 API Key（仅限本人）。
+func apiKeyDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !verifyCSRF(r) {
+		http.Error(w, "CSRF token invalid", http.StatusBadRequest)
+		return
+	}
+	userID, _, _ := currentUser(r)
+	if userID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	keyID, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil || keyID <= 0 {
+		http.Error(w, "invalid key id", http.StatusBadRequest)
+		return
+	}
+	if err := models.DeleteAPIKey(userID, keyID); err != nil {
+		http.Error(w, "删除失败", http.StatusInternalServerError)
+		return
+	}
+	flashRedirect(w, r, "/profile", "已删除该 API Key")
 }
 
 // ------------------------- 渠道列表查询 -------------------------
@@ -5881,11 +6043,15 @@ func apiGenerateHandler(w http.ResponseWriter, r *http.Request) {
 	if chanModel == "" {
 		chanModel = models.GetConfigOr("generation_model", "grok-imagine-image-lite")
 	}
-	res, err = models.DB.Exec("INSERT INTO generation_records(user_id, prompt, model, n, aspect_ratio, resolution, response_format, cost_points, status, nsfw, channel) VALUES(?,?,?,?,?,?,?,?,'processing',?,?)",
-		userID, req.Prompt, chanModel, req.N, req.AspectRatio, req.Resolution, "url", cost, nsfwFlag, ep.Name)
+	taskKey := models.RandomTaskKey()
+	res, err = models.DB.Exec("INSERT INTO generation_records(user_id, prompt, model, n, aspect_ratio, resolution, response_format, cost_points, status, nsfw, channel, task_key) VALUES(?,?,?,?,?,?,?,?,'processing',?,?,?)",
+		userID, req.Prompt, chanModel, req.N, req.AspectRatio, req.Resolution, "url", cost, nsfwFlag, ep.Name, taskKey)
 	if err != nil {
 		models.DB.Exec("UPDATE users SET points = points + ? WHERE id=?", cost, userID)
 		logPoints(userID, int64(cost), "生成任务创建失败，积分退回")
+		var apiUser string
+		models.DB.QueryRow("SELECT username FROM users WHERE id=?", userID).Scan(&apiUser)
+		systemLog(r, userID, apiUser, "refund", "API 任务创建失败，积分退回", int64(cost))
 		http.Error(w, `{"ok":false,"error":"任务创建失败，积分已退回"}`, http.StatusInternalServerError)
 		return
 	}
@@ -5893,13 +6059,14 @@ func apiGenerateHandler(w http.ResponseWriter, r *http.Request) {
 	logPoints(userID, -int64(cost), "AI 图片创作消耗")
 	var apiUser string
 	models.DB.QueryRow("SELECT username FROM users WHERE id=?", userID).Scan(&apiUser)
-	systemLog(r, userID, apiUser, "api", fmt.Sprintf("API 生成 %d 张（%s），任务 #%d", req.N, chanModel, rid), -int64(cost))
+	systemLog(r, userID, apiUser, "api", fmt.Sprintf("API 生成 %d 张（%s），任务 #%s", req.N, chanModel, taskKey), -int64(cost))
 	taskQueue <- genTask{recordID: rid}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ok":      true,
-		"task_id": rid,
-		"message": "任务已提交",
+		"ok":       true,
+		"task_id":  rid,
+		"task_key": taskKey,
+		"message":  "任务已提交",
 	})
 }
 
@@ -5925,10 +6092,10 @@ func apiStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var recordID int64
-	var prompt, statusStr, imageURL, errorMsg string
+	var prompt, statusStr, imageURL, errorMsg, taskKey string
 	var n int
 	var createdAt time.Time
-	err = models.DB.QueryRow("SELECT id, prompt, status, image_url, error_msg, n, created_at FROM generation_records WHERE id=? AND user_id=?", id, userID).Scan(&recordID, &prompt, &statusStr, &imageURL, &errorMsg, &n, &createdAt)
+	err = models.DB.QueryRow("SELECT id, prompt, status, image_url, error_msg, n, created_at, task_key FROM generation_records WHERE id=? AND user_id=?", id, userID).Scan(&recordID, &prompt, &statusStr, &imageURL, &errorMsg, &n, &createdAt, &taskKey)
 	if err != nil {
 		http.Error(w, `{"ok":false,"error":"task not found"}`, http.StatusNotFound)
 		return
@@ -5954,12 +6121,248 @@ func apiStatusHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"ok":         true,
 		"task_id":    recordID,
+		"task_key":   taskKey,
 		"status":     statusStr,
 		"prompt":     prompt,
 		"images":     images,
 		"error":      errorMsg,
 		"created_at": createdAt.Format(time.RFC3339),
 	})
+}
+
+// ------------------------- OpenAI 兼容生成接口 -------------------------
+// POST /v1/images/generations：兼容 OpenAI Images API 格式（请求与响应）。
+// 请求体：
+//
+//	{
+//	  "model": "grok-imagine-image-lite",   // 可选，缺省用渠道默认模型
+//	  "prompt": "一只猫",
+//	  "n": 1,                                // 1-4，默认 1
+//	  "size": "1024x1024",                  // OpenAI 尺寸，映射为宽高比+分辨率
+//	  "response_format": "url"             // url（默认）或 b64_json
+//	}
+//
+// 渠道等本站专有参数不在请求中出现，而是创建 API Key 时绑定。
+// 响应（成功）：{"created": <unix秒>, "data":[{"url": "..."}|{"b64_json": "..."}]}
+// 响应（失败）：{"error": {"message": "...", "type": "...", "param": null, "code": null}}
+func openAIImagesGenerationsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		apiOpenAIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 POST")
+		return
+	}
+	userID, ok := r.Context().Value("userID").(int64)
+	if !ok {
+		apiOpenAIError(w, http.StatusUnauthorized, "authentication_error", "无效的 API Key")
+		return
+	}
+	channelID, _ := r.Context().Value("apiChannelID").(int)
+	var req struct {
+		Model          string `json:"model"`
+		Prompt         string `json:"prompt"`
+		N              int    `json:"n"`
+		Size           string `json:"size"`
+		ResponseFormat string `json:"response_format"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apiOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "请求体不是合法 JSON")
+		return
+	}
+	req.Prompt = strings.TrimSpace(req.Prompt)
+	if req.Prompt == "" {
+		apiOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "prompt 不能为空")
+		return
+	}
+	if utf8.RuneCountInString(req.Prompt) > 4000 {
+		apiOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "prompt 最长 4000 字")
+		return
+	}
+	if req.N < 1 {
+		req.N = 1
+	}
+	if req.N > 4 {
+		req.N = 4
+	}
+	if req.ResponseFormat == "" {
+		req.ResponseFormat = "url"
+	}
+	if req.ResponseFormat != "url" && req.ResponseFormat != "b64_json" {
+		apiOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "response_format 仅支持 url / b64_json")
+		return
+	}
+	// 渠道：优先 Key 绑定（channel_id），未绑定则自动选普通渠道
+	var ep GenerationEndpoint
+	var err error
+	if channelID > 0 {
+		ep, err = resolveChannel(strconv.Itoa(channelID))
+	} else {
+		ep, err = selectEndpoint(false)
+	}
+	if err != nil {
+		apiOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	// size → 宽高比 + 分辨率（OpenAI 尺寸如 1024x1024 / 1792x1024 / 1024x1792）
+	ratio, res := openAISizeToParams(req.Size)
+	if !containsString(ep.Resolutions, res) {
+		apiOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
+			fmt.Sprintf("所选渠道不支持 %s 分辨率（支持：%s），请更换 size", res, strings.Join(ep.Resolutions, ", ")))
+		return
+	}
+	// 模型：请求指定且渠道支持则用之，否则渠道默认模型
+	chanModel := strings.TrimSpace(ep.Model)
+	if chanModel == "" {
+		chanModel = models.GetConfigOr("generation_model", "grok-imagine-image-lite")
+	}
+	if m := strings.TrimSpace(req.Model); m != "" && containsString(ep.Models, m) {
+		chanModel = m
+	}
+	// 扣分（与网页一致）：条件扣减防止并发扣成负数
+	baseCost := generationCost()
+	cost := baseCost * req.N
+	if int64(userPoints(userID)) < int64(cost) {
+		apiOpenAIError(w, http.StatusPaymentRequired, "insufficient_quota", fmt.Sprintf("积分不足，需要 %d 积分", cost))
+		return
+	}
+	nsfwFlag := 0
+	if ep.NSFW {
+		nsfwFlag = 1
+	}
+	res2, err := models.DB.Exec("UPDATE users SET points = points - ? WHERE id=? AND points >= ?", cost, userID, cost)
+	if err != nil {
+		apiOpenAIError(w, http.StatusInternalServerError, "server_error", "系统繁忙")
+		return
+	}
+	if n, _ := res2.RowsAffected(); n == 0 {
+		apiOpenAIError(w, http.StatusPaymentRequired, "insufficient_quota", "积分不足，请稍后重试")
+		return
+	}
+	taskKey := models.RandomTaskKey()
+	ins, err := models.DB.Exec("INSERT INTO generation_records(user_id, prompt, model, n, aspect_ratio, resolution, response_format, cost_points, status, nsfw, channel, task_key) VALUES(?,?,?,?,?,?,?,?,'processing',?,?,?)",
+		userID, req.Prompt, chanModel, req.N, ratio, res, "url", cost, nsfwFlag, ep.Name, taskKey)
+	if err != nil {
+		// 扣款成功但记录落库失败：立即退回积分
+		models.DB.Exec("UPDATE users SET points = points + ? WHERE id=?", cost, userID)
+		logPoints(userID, int64(cost), "生成任务创建失败，积分退回")
+		var apiUser string
+		models.DB.QueryRow("SELECT username FROM users WHERE id=?", userID).Scan(&apiUser)
+		systemLog(r, userID, apiUser, "refund", "API 任务创建失败，积分退回", int64(cost))
+		apiOpenAIError(w, http.StatusInternalServerError, "server_error", "任务创建失败，积分已退回")
+		return
+	}
+	rid, _ := ins.LastInsertId()
+	logPoints(userID, -int64(cost), "AI 图片创作消耗")
+	var apiUser string
+	models.DB.QueryRow("SELECT username FROM users WHERE id=?", userID).Scan(&apiUser)
+	systemLog(r, userID, apiUser, "api", fmt.Sprintf("API 生成 %d 张（%s），任务 #%s", req.N, chanModel, taskKey), -int64(cost))
+	taskQueue <- genTask{recordID: rid}
+
+	// OpenAI 语义：同步等待生成完成后返回图片
+	images, errMsg := waitGenerationDone(rid, 150*time.Second)
+	if errMsg != "" {
+		detail := truncateRunes(errMsg, 250)
+		if detail == "" {
+			detail = "生成失败，积分已退回"
+		}
+		apiOpenAIError(w, http.StatusInternalServerError, "generation_failed", detail)
+		return
+	}
+	created := time.Now().Unix()
+	data := []map[string]interface{}{}
+	for _, p := range images {
+		if req.ResponseFormat == "b64_json" {
+			// 读取本地图片字节转 base64；本地缺失但存在外部备份地址时回退 url
+			b, rerr := os.ReadFile("data" + p)
+			if rerr == nil {
+				data = append(data, map[string]interface{}{"b64_json": base64.StdEncoding.EncodeToString(b)})
+			} else {
+				data = append(data, map[string]interface{}{"url": p})
+			}
+		} else {
+			data = append(data, map[string]interface{}{"url": p})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	noStore(w)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"created": created,
+		"data":    data,
+	})
+}
+
+// apiOpenAIError 以 OpenAI 兼容的错误格式输出 JSON 错误响应。
+func apiOpenAIError(w http.ResponseWriter, status int, typ, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": message,
+			"type":    typ,
+			"param":   nil,
+			"code":    nil,
+		},
+	})
+}
+
+// openAISizeToParams 把 OpenAI 风格的 size（如 1024x1024）换算成
+// 本站的宽高比与分辨率档位。空值或无法解析时回退 1:1 + 1k。
+func openAISizeToParams(size string) (ratio, res string) {
+	size = strings.TrimSpace(strings.ToLower(size))
+	var w, h int
+	if _, err := fmt.Sscanf(size, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
+		return "1:1", "1k"
+	}
+	long := w
+	if h > long {
+		long = h
+	}
+	switch {
+	case long <= 1024:
+		res = "1k"
+	case long <= 2048:
+		res = "2k"
+	default:
+		res = "4k"
+	}
+	// 按宽高比就近匹配本站支持的 6 种比例
+	type ar struct {
+		name string
+		v    float64
+	}
+	ars := []ar{
+		{"1:1", 1.0},
+		{"16:9", 16.0 / 9.0},
+		{"4:3", 4.0 / 3.0},
+		{"3:4", 3.0 / 4.0},
+		{"9:16", 9.0 / 16.0},
+		{"21:9", 21.0 / 9.0},
+	}
+	f := float64(w) / float64(h)
+	best := ars[0]
+	for _, a := range ars[1:] {
+		if math.Abs(f-a.v) < math.Abs(f-best.v) {
+			best = a
+		}
+	}
+	return best.name, res
+}
+
+// waitGenerationDone 轮询任务状态直到成功/失败或超时，返回图片路径列表与错误信息。
+func waitGenerationDone(recordID int64, timeout time.Duration) ([]string, string) {
+	deadline := time.Now().Add(timeout)
+	for {
+		var status, errMsg string
+		models.DB.QueryRow("SELECT status, error_msg FROM generation_records WHERE id=?", recordID).Scan(&status, &errMsg)
+		switch status {
+		case "success":
+			return recordImagePaths(recordID), ""
+		case "failed":
+			return nil, errMsg
+		}
+		if time.Now().After(deadline) {
+			return nil, "生成超时，请稍后重试"
+		}
+		time.Sleep(800 * time.Millisecond)
+	}
 }
 
 // ------------------------- API 文档页 -------------------------
