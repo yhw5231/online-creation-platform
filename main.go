@@ -579,10 +579,10 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; "+
+			"default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "+
 				"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
 				"img-src 'self' data: https:; font-src 'self' data: https://cdn.jsdelivr.net; "+
-				"connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+				"connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }

@@ -1846,6 +1846,12 @@ func TestRecordsTotalCostExcludesFailed(t *testing.T) {
 		channel TEXT, nsfw INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
 	models.DB.Exec(`INSERT INTO generation_records(user_id, prompt, cost_points, status) VALUES
 		(1,'成功一',10,'success'), (1,'成功二',10,'success'), (1,'失败一',10,'failed')`)
+	// 多图记录：触发记录页副图遍历（ImagesSub/AltURLs），防止
+	// "error calling len: reflect: call of reflect.Value.Type on zero Value" 回归
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0,
+		path TEXT DEFAULT '', storage_type TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/s1.png'),(1,1,'/images/s2.png')")
 
 	req := httptest.NewRequest(http.MethodGet, "/records", nil)
 	// gorilla/sessions 以请求为上下文保存会话，直接在此请求上写入即可
@@ -1862,6 +1868,12 @@ func TestRecordsTotalCostExcludesFailed(t *testing.T) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String()[:200])
 	}
 	body, _ := io.ReadAll(w.Body)
+	if strings.Contains(string(body), "Template error") || strings.Contains(string(body), "<no value>") {
+		t.Fatalf("records page must not contain template errors: %s", truncateRunes(string(body), 300))
+	}
+	if !strings.Contains(string(body), "/images/s2.png") {
+		t.Errorf("records page should render multi-image sub images: %s", truncateRunes(string(body), 300))
+	}
 	idx := strings.Index(string(body), "累计消耗")
 	if idx < 0 {
 		t.Fatal("records page missing 累计消耗")
@@ -1981,8 +1993,11 @@ func TestAdminRecordsReview(t *testing.T) {
 	models.DB.Exec("INSERT INTO users(id, username, password_hash, role, status) VALUES(101,'bob','x','user',1)")
 	models.DB.Exec(`INSERT INTO generation_records(user_id, prompt, cost_points, status, image_url) VALUES
 		(100,'星空图',10,'success','/images/a.png'),
-		(101,'失败作',10,'failed','')`)
-	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/a.png')")
+		(101,'失败作',10,'failed',''),
+		(100,'多图记录',10,'success','/images/multi1.png')`)
+	// 多图记录（无外部存储，AltURLs 为空）：回归验证页内副图遍历不触发
+	// "error calling len: reflect: call of reflect.Value.Type on zero Value"
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/a.png'),(3,0,'/images/multi1.png'),(3,1,'/images/multi2.png')")
 
 	// 管理员会话浏览审查页
 	render := func(path string) string {
@@ -2002,12 +2017,15 @@ func TestAdminRecordsReview(t *testing.T) {
 	}
 
 	body := render("/admin/records")
-	for _, want := range []string{"创作记录审查", "alice", "bob", "星空图", "失败作", "/images/a.png"} {
+	if strings.Contains(body, "Template error") || strings.Contains(body, "<no value>") {
+		t.Fatalf("review page must not contain template errors: %s", truncateRunes(body, 300))
+	}
+	for _, want := range []string{"创作记录审查", "alice", "bob", "星空图", "失败作", "多图记录", "/images/a.png", "/images/multi1.png", "/images/multi2.png"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review page missing %q (len=%d)", want, len(body))
 		}
 	}
-	if !strings.Contains(body, "归档图片") || !strings.Contains(body, "1 张") {
+	if !strings.Contains(body, "归档图片") || !strings.Contains(body, "3 张") {
 		t.Errorf("review page should count archived images, got: %s", truncateRunes(body, 300))
 	}
 

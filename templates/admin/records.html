@@ -30,6 +30,7 @@
 {{if gt (len .Records) 0}}
 <div class="row g-3">
     {{range .Records}}
+    {{$rec := .}}
     <div class="col-6 col-md-4 col-xl-3">
         <div class="record-card">
             {{if .ImageURL}}
@@ -41,7 +42,7 @@
             {{end}}
             {{if gt (len .ImagesSub) 0}}
             <div class="record-subs">
-                {{range $i, $img := .ImagesSub}}<img src="{{$img}}" loading="lazy" data-lightbox alt="作品缩略图" data-cache-key="{{$.TaskKey}}-{{add $i 1}}" {{if ge (len $.AltURLs) (add $i 2)}}data-alt="{{index $.AltURLs (add $i 1)}}"{{end}}>{{end}}
+                {{range $i, $img := .ImagesSub}}<img src="{{$img}}" loading="lazy" data-lightbox alt="作品缩略图" data-cache-key="{{$rec.TaskKey}}-{{add $i 1}}" {{if ge (len $rec.AltURLs) (add $i 2)}}data-alt="{{index $rec.AltURLs (add $i 1)}}"{{end}}>{{end}}
             </div>
             {{end}}
             <div class="record-body">
