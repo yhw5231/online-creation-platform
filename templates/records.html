@@ -10,6 +10,12 @@
             <a href="{{.PageBase}}view=full&page={{.Page}}" class="btn btn-outline-secondary {{if eq .ViewMode "full"}}active{{end}}">完整</a>
             <a href="{{.PageBase}}view=images&page={{.Page}}" class="btn btn-outline-secondary {{if eq .ViewMode "images"}}active{{end}}">仅图片</a>
         </div>
+        {{if gt .FailedCount 0}}
+        <form method="POST" action="/records/delete-failed" class="d-inline" data-submit="loading">
+            <input type="hidden" name="_csrf" value="{{.CSRF}}">
+            <button type="submit" class="btn btn-outline-danger btn-sm btn-loading" data-loading-text="删除中..." data-confirm="确定一键删除全部 {{.FailedCount}} 条失败记录吗？此操作不可恢复。">一键删除失败记录（{{.FailedCount}}）</button>
+        </form>
+        {{end}}
         <span class="badge text-bg-light">本页 {{len .Records}} 张 / 共 {{if .Total}}{{.Total}}{{else}}0{{end}} 张</span>
         <span class="badge text-bg-light">累计消耗 <strong class="text-danger">{{comma .TotalCost}}</strong> 积分</span>
         <a href="/create" class="btn btn-primary btn-sm">＋ 新建创作</a>
@@ -54,7 +60,9 @@
                     <span class="badge text-bg-light">×{{.N}}</span>
                     <span class="badge text-bg-light">{{.AspectRatio}} · {{.Resolution}}</span>
                     {{if eq .Status "processing"}}<span class="badge text-bg-primary">生成中</span>
-                    {{else if eq .Status "failed"}}<span class="badge text-bg-danger">失败</span>{{end}}
+                    {{else if eq .Status "failed"}}<span class="badge text-bg-danger">失败</span>
+                    {{else if .IsPublic}}<span class="badge text-bg-success" title="已发布到创作广场">广场已发布</span>
+                    {{else}}<span class="badge text-bg-secondary" title="未发布到创作广场，其他用户不可见">未发布</span>{{end}}
                 </div>
                 <div class="record-error">
                     {{if eq .Status "failed"}}<div class="small text-danger" title="{{.ErrorMsg}}">{{if .ErrorMsg}}{{trunc .ErrorMsg 100}}{{end}}</div>{{end}}
@@ -76,6 +84,14 @@
                         {{end}}
                         {{end}}
                         <a href="/create?prompt={{urlquery .Prompt}}" class="btn btn-sm btn-outline-primary" title="沿用这条提示词再次创作">再生成</a>
+                        {{if eq .Status "success"}}
+                        <form method="POST" action="/records/publish" class="d-inline" data-submit="loading">
+                            <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                            <input type="hidden" name="id" value="{{.TaskKey}}">
+                            <input type="hidden" name="publish" value="{{if .IsPublic}}0{{else}}1{{end}}">
+                            <button type="submit" class="btn btn-sm {{if .IsPublic}}btn-outline-warning{{else}}btn-outline-success{{end}} btn-loading" data-loading-text="..." title="{{if .IsPublic}}取消发布到创作广场{{else}}发布到创作广场{{end}}">{{if .IsPublic}}取消发布{{else}}发布广场{{end}}</button>
+                        </form>
+                        {{end}}
                         <form method="POST" action="/records/delete" class="d-inline" data-submit="loading">
                             <input type="hidden" name="_csrf" value="{{$.CSRF}}">
                             <input type="hidden" name="id" value="{{.TaskKey}}">

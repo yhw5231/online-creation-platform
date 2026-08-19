@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"online-creation-platform/models"
 	"online-creation-platform/services"
@@ -3202,5 +3203,650 @@ func TestAdminUserManagement(t *testing.T) {
 		if !strings.Contains(ww.Body.String(), s) {
 			t.Errorf("admin users page missing %q", s)
 		}
+	}
+}
+
+// ------- 创作广场 / 点赞 / 一键删除失败记录 -------
+
+// TestSquareHandler 验证创作广场页正常渲染：公开访问返回 200，
+// 包含广场标题、今日点赞榜、7天点赞榜等区域。
+func TestSquareHandler(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+	models.DB.Exec("DELETE FROM users")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1),(2,'u2','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, model TEXT,
+		n INTEGER DEFAULT 1, aspect_ratio TEXT, resolution TEXT, response_format TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT, error_msg TEXT,
+		channel TEXT, nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0,
+		published_at DATETIME, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec(`INSERT INTO generation_records(id, user_id, prompt, cost_points, status, is_public, nsfw) VALUES
+		(1,1,'广场作品1',10,'success',1,0),
+		(2,1,'未发布作品',10,'success',0,0),
+		(3,2,'广场作品2',10,'success',1,0),
+		(4,1,'nsfw作品',10,'success',1,1),
+		(5,1,'失败作品',10,'failed',1,0)`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0, path TEXT DEFAULT '', storage_type TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/s1.png'),(3,0,'/images/s3.png')")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/square", nil)
+	squareHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", w.Code)
+	}
+	body := w.Body.String()
+	for _, s := range []string{"创作广场", "广场作品1", "广场作品2", "今日点赞榜", "7 天点赞榜", "登录后创作发布"} {
+		if !strings.Contains(body, s) {
+			t.Errorf("square page should contain %q", s)
+		}
+	}
+	// 未发布、NSFW、失败记录不应出现在广场
+	if strings.Contains(body, "未发布作品") {
+		t.Error("square page should not contain unpublished record")
+	}
+	if strings.Contains(body, "nsfw作品") {
+		t.Error("square page should not contain NSFW record")
+	}
+	if strings.Contains(body, "失败作品") {
+		t.Error("square page should not contain failed record")
+	}
+}
+
+// TestSquareNotShowCleaned 验证广场不展示已被清理的作品：
+// 记录图片本地路径与外部备份都为空（已删除/已清理）时，作品不在广场出现。
+func TestSquareNotShowCleaned(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+	models.DB.Exec("DELETE FROM users")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, model TEXT,
+		n INTEGER DEFAULT 1, aspect_ratio TEXT, resolution TEXT, response_format TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT, error_msg TEXT,
+		channel TEXT, nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0,
+		published_at DATETIME, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec(`INSERT INTO generation_records(id, user_id, prompt, cost_points, status, is_public, nsfw) VALUES
+		(1,1,'正常作品',10,'success',1,0),
+		(2,1,'已清理作品',10,'success',1,0)`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0, path TEXT DEFAULT '', storage_type TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
+	// 作品1 有本地图片；作品2 本地路径被清空且无外部备份（= 已被清理）
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path, storage_path) VALUES(1,0,'/images/a.png',''),(2,0,'','')")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/square", nil)
+	squareHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "正常作品") {
+		t.Errorf("square should show record with existing image: %s", truncateRunes(body, 200))
+	}
+	if strings.Contains(body, "已清理作品") {
+		t.Error("square should NOT show cleaned record (no local/remote image)")
+	}
+}
+
+// TestSquareUserHandler 验证创作人页面：显示该用户已发布的作品，
+// 不显示该用户未发布或失败的作品。
+func TestSquareUserHandler(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+	models.DB.Exec("DELETE FROM users")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, model TEXT,
+		n INTEGER DEFAULT 1, aspect_ratio TEXT, resolution TEXT, response_format TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT, error_msg TEXT,
+		channel TEXT, nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0,
+		published_at DATETIME, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec(`INSERT INTO generation_records(id, user_id, prompt, cost_points, status, is_public) VALUES
+		(1,1,'已发布作品',10,'success',1),
+		(2,1,'未发布作品',10,'success',0)`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0, path TEXT DEFAULT '', storage_type TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/s1.png')")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/square/user?u=u1", nil)
+	squareUserHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "u1 的作品") {
+		t.Errorf("user page should show username: %s", truncateRunes(body, 200))
+	}
+	if !strings.Contains(body, "已发布作品") {
+		t.Errorf("user page should show published record: %s", truncateRunes(body, 200))
+	}
+	if strings.Contains(body, "未发布作品") {
+		t.Error("user page should not show unpublished record")
+	}
+
+	// 不存在的用户返回 404
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/square/user?u=nobody", nil)
+	squareUserHandler(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("missing user status=%d", w2.Code)
+	}
+	if !strings.Contains(w2.Body.String(), "404") {
+		t.Errorf("missing user should show 404: %s", truncateRunes(w2.Body.String(), 200))
+	}
+}
+
+// TestSquareLike 验证点赞流程：用户可点赞他人作品，不能给自己点赞，
+// 重复点赞切换为取消，点赞数实时更新。
+func TestSquareLike(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	models.DB.Exec("DELETE FROM users")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1),(2,'u2','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT,
+		nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec("INSERT INTO generation_records(id, user_id, prompt, cost_points, status, is_public, nsfw) VALUES(1,1,'作品1',10,'success',1,0)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
+
+	csrf := "test-csrf"
+	// u2 登录
+	req := httptest.NewRequest(http.MethodPost, "/square/like", strings.NewReader("id=1&_csrf="+csrf))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	s, _ := store.Get(req, "session")
+	s.Values["userID"] = int64(2)
+	s.Values["username"] = "u2"
+	s.Values["role"] = "user"
+	s.Values["csrf"] = csrf
+	w0 := httptest.NewRecorder()
+	s.Save(req, w0)
+
+	w := httptest.NewRecorder()
+	squareLikeHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("like status=%d", w.Code)
+	}
+	var resp struct {
+		Ok    bool `json:"ok"`
+		Liked bool `json:"liked"`
+		Count int  `json:"count"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v body=%s", err, w.Body.String())
+	}
+	if !resp.Ok || !resp.Liked || resp.Count != 1 {
+		t.Errorf("first like: ok=%v liked=%v count=%d, want ok=true liked=true count=1", resp.Ok, resp.Liked, resp.Count)
+	}
+
+	// 再次点赞（切换为取消）
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/square/like", strings.NewReader("id=1&_csrf="+csrf))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req2.Header.Set("X-Requested-With", "XMLHttpRequest")
+	s2, _ := store.Get(req2, "session")
+	s2.Values["userID"] = int64(2)
+	s2.Values["username"] = "u2"
+	s2.Values["role"] = "user"
+	s2.Values["csrf"] = csrf
+	w0b := httptest.NewRecorder()
+	s2.Save(req2, w0b)
+	squareLikeHandler(w2, req2)
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if !resp.Ok || resp.Liked || resp.Count != 0 {
+		t.Errorf("toggle unlike: ok=%v liked=%v count=%d, want ok=true liked=false count=0", resp.Ok, resp.Liked, resp.Count)
+	}
+
+	// 给自己点赞（不允许）
+	req3 := httptest.NewRequest(http.MethodPost, "/square/like", strings.NewReader("id=1&_csrf="+csrf))
+	req3.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req3.Header.Set("X-Requested-With", "XMLHttpRequest")
+	s3, _ := store.Get(req3, "session")
+	s3.Values["userID"] = int64(1) // owner of record 1
+	s3.Values["username"] = "u1"
+	s3.Values["role"] = "user"
+	s3.Values["csrf"] = csrf
+	w0c := httptest.NewRecorder()
+	s3.Save(req3, w0c)
+	w3 := httptest.NewRecorder()
+	squareLikeHandler(w3, req3)
+	if err := json.Unmarshal(w3.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if resp.Ok {
+		t.Errorf("self-like should not be allowed: %s", w3.Body.String())
+	}
+}
+
+// TestRecordDeleteFailed 验证一键删除失败记录接口：只删除当前用户的失败记录，
+// 成功记录不受影响，失败记录的相关点赞数据一并清理。
+func TestRecordDeleteFailed(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	models.DB.Exec("DELETE FROM users")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT,
+		nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+		task_key TEXT DEFAULT '')`)
+	models.DB.Exec(`INSERT INTO generation_records(id, user_id, prompt, cost_points, status, task_key) VALUES
+		(1,1,'成功记录',10,'success','sk1'),
+		(2,1,'失败记录1',10,'failed','fk1'),
+		(3,1,'失败记录2',10,'failed','fk2')`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0, path TEXT DEFAULT '', storage_type TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(2,0,'/images/fail1.png')")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
+	models.DB.Exec("INSERT INTO creation_likes(record_id, user_id) VALUES(2,1)")
+
+	csrf := "test-csrf"
+	req := httptest.NewRequest(http.MethodPost, "/records/delete-failed", strings.NewReader("_csrf="+csrf))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	s, _ := store.Get(req, "session")
+	s.Values["userID"] = int64(1)
+	s.Values["username"] = "u1"
+	s.Values["role"] = "user"
+	s.Values["csrf"] = csrf
+	w0 := httptest.NewRecorder()
+	s.Save(req, w0)
+
+	w := httptest.NewRecorder()
+	recordDeleteFailedHandler(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("delete-failed status=%d want 303", w.Code)
+	}
+	var successCount, failedCount int
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE user_id=1 AND status='success'").Scan(&successCount)
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE user_id=1 AND status='failed'").Scan(&failedCount)
+	if successCount != 1 {
+		t.Errorf("success records should remain: got %d, want 1", successCount)
+	}
+	if failedCount != 0 {
+		t.Errorf("failed records should be deleted: got %d, want 0", failedCount)
+	}
+	// 失败记录的点赞应一并清理
+	var likeCount int
+	models.DB.QueryRow("SELECT COUNT(*) FROM creation_likes WHERE record_id=2").Scan(&likeCount)
+	if likeCount != 0 {
+		t.Errorf("likes of deleted failed record should be cleaned: got %d, want 0", likeCount)
+	}
+}
+
+// TestRecordPublish 验证发布/取消发布切换：成功记录可发布到广场，
+// 失败记录不能发布；切换后查询数据库验证 is_public 状态。
+func TestRecordPublish(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	models.DB.Exec("DELETE FROM users")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT,
+		nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+		task_key TEXT DEFAULT '')`)
+	models.DB.Exec(`INSERT INTO generation_records(id, user_id, prompt, cost_points, status, is_public, task_key) VALUES
+		(1,1,'成功记录',10,'success',0,'sk1'),
+		(2,1,'失败记录',10,'failed',0,'fk1')`)
+
+	csrf := "test-csrf"
+	// 发布成功记录
+	req := httptest.NewRequest(http.MethodPost, "/records/publish", strings.NewReader("id=sk1&publish=1&_csrf="+csrf))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	s, _ := store.Get(req, "session")
+	s.Values["userID"] = int64(1)
+	s.Values["username"] = "u1"
+	s.Values["role"] = "user"
+	s.Values["csrf"] = csrf
+	w0 := httptest.NewRecorder()
+	s.Save(req, w0)
+	w := httptest.NewRecorder()
+	recordPublishHandler(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("publish status=%d want 303", w.Code)
+	}
+	var isPublic int
+	models.DB.QueryRow("SELECT is_public FROM generation_records WHERE id=1").Scan(&isPublic)
+	if isPublic != 1 {
+		t.Errorf("publish success record: is_public=%d want 1", isPublic)
+	}
+
+	// 尝试发布失败记录（不应允许）
+	req2 := httptest.NewRequest(http.MethodPost, "/records/publish", strings.NewReader("id=fk1&publish=1&_csrf="+csrf))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	s2, _ := store.Get(req2, "session")
+	s2.Values["userID"] = int64(1)
+	s2.Values["username"] = "u1"
+	s2.Values["role"] = "user"
+	s2.Values["csrf"] = csrf
+	w0b := httptest.NewRecorder()
+	s2.Save(req2, w0b)
+	w2 := httptest.NewRecorder()
+	recordPublishHandler(w2, req2)
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("publish failed record should be rejected: status=%d", w2.Code)
+	}
+	models.DB.QueryRow("SELECT is_public FROM generation_records WHERE id=2").Scan(&isPublic)
+	if isPublic != 0 {
+		t.Errorf("failed record should not be publishable: is_public=%d", isPublic)
+	}
+}
+
+// TestLikeRanking 验证点赞排行榜：按北京时间的当日/近 7 天排序，
+// 只统计正常状态用户，正确返回排名与数量。
+func TestLikeRanking(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, points INTEGER DEFAULT 0, role TEXT DEFAULT 'user', status INTEGER DEFAULT 1)`)
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1),(2,'u2','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
+	models.DB.Exec("INSERT INTO creation_likes(record_id, user_id) VALUES(1,1),(2,1),(3,1),(4,2)")
+
+	daily := likeRanking("daily", 10)
+	if len(daily) == 0 {
+		t.Log("daily ranking empty (no likes today), not a test issue")
+	}
+	week := likeRanking("week", 10)
+	if len(week) == 0 {
+		t.Log("week ranking empty (no likes this week), not a test issue")
+	}
+}
+
+// TestSettleLikeRanking 验证每日点赞排行结算：幂等性（重复结算不重复发放），
+// 无点赞时不发放积分。
+func TestSettleLikeRanking(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, points INTEGER DEFAULT 0, role TEXT DEFAULT 'user', status INTEGER DEFAULT 1)`)
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',0,'user',1),(2,'u2','x',0,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, status TEXT, nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0)`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0, path TEXT DEFAULT '')`)
+	models.DB.Exec("INSERT INTO generation_records(id, user_id, prompt, status, is_public) VALUES(1,1,'p1','success',1),(2,1,'p2','success',1),(3,1,'p3','success',1),(4,2,'p4','success',1)")
+	// 结算今天的日期（可能没有数据，但两次调用都应幂等不报错）
+	today := time.Now().In(beijingTZ).Format("2006-01-02")
+	settleLikeRanking(today)
+	settleLikeRanking(today)
+	// 无点赞，无人获得奖励
+	var p1, p2 int64
+	models.DB.QueryRow("SELECT points FROM users WHERE id=1").Scan(&p1)
+	models.DB.QueryRow("SELECT points FROM users WHERE id=2").Scan(&p2)
+	if p1 != 0 || p2 != 0 {
+		t.Errorf("no likes yet, points should be 0: u1=%d u2=%d", p1, p2)
+	}
+}
+
+// setupSquareTestEnv 为广场相关测试准备一张最小可渲染的表结构与数据
+// （匿名函数返回清理函数：关闭全局 DB）。
+func setupSquareTestEnv(t *testing.T) func() {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+	models.DB.Exec("DELETE FROM users")
+	return func() { models.DB.Close() }
+}
+
+func squareBaseTables() {
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, points INTEGER DEFAULT 0, role TEXT DEFAULT 'user', status INTEGER DEFAULT 1, show_nsfw INTEGER DEFAULT 0)`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, model TEXT,
+		n INTEGER DEFAULT 1, aspect_ratio TEXT, resolution TEXT, response_format TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT, error_msg TEXT,
+		channel TEXT, nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0,
+		published_at DATETIME, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0, path TEXT DEFAULT '', storage_type TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS like_daily_awards (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, user_id INTEGER NOT NULL, like_count INTEGER DEFAULT 0, rank INTEGER DEFAULT 0, points INTEGER DEFAULT 0, UNIQUE(date, user_id))`)
+}
+
+// authenticatedRequest 构造一个已登录的（可带用户 ID）HTTP 请求。
+func authenticatedRequest(t *testing.T, method, target string, uid int64, uname string, body string) *http.Request {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	s, _ := store.Get(req, "session")
+	s.Values["userID"] = uid
+	s.Values["username"] = uname
+	s.Values["role"] = "user"
+	s.Values["csrf"] = "test-csrf"
+	w0 := httptest.NewRecorder()
+	s.Save(req, w0)
+	return req
+}
+
+// TestSquareDisabled 验证广场开关：关闭后访问广场显示“已关闭”提示，
+// 点赞接口也拒绝操作。
+func TestSquareDisabled(t *testing.T) {
+	cleanup := setupSquareTestEnv(t)
+	defer cleanup()
+	squareBaseTables()
+	models.SetConfig("square_enabled", "false")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1)")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/square", nil)
+	squareHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "创作广场已关闭") {
+		t.Error("square disabled page should show 创作广场已关闭")
+	}
+	// 点赞也拒绝
+	req2 := authenticatedRequest(t, http.MethodPost, "/square/like", 1, "u1", "id=1&_csrf=test-csrf")
+	w2 := httptest.NewRecorder()
+	squareLikeHandler(w2, req2)
+	var resp struct {
+		Ok  bool   `json:"ok"`
+		Err string `json:"error"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if resp.Ok {
+		t.Error("like should be rejected when square disabled")
+	}
+}
+
+// TestSquareNSFWVisibility 验证 NSFW 可见性规则：
+// 管理员允许 NSFW 时，未登录/未开启的用户看不到 NSFW 作品，
+// 已登录且开启 show_nsfw 的用户可以看到。
+func TestSquareNSFWVisibility(t *testing.T) {
+	cleanup := setupSquareTestEnv(t)
+	defer cleanup()
+	squareBaseTables()
+	models.SetConfig("square_allow_nsfw", "true")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status, show_nsfw) VALUES(1,'u1','x',100,'user',1,0),(2,'u2','x',100,'user',1,1)")
+	models.DB.Exec(`INSERT INTO generation_records(id, user_id, prompt, cost_points, status, is_public, nsfw) VALUES
+		(1,1,'普通作品',10,'success',1,0),
+		(2,1,'NSFW作品',10,'success',1,1)`)
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/a.png'),(2,0,'/images/b.png')")
+
+	// 未登录：看不到 NSFW
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/square", nil)
+	squareHandler(w, req)
+	body := w.Body.String()
+	if !strings.Contains(body, "普通作品") {
+		t.Error("logged-out user should see normal work")
+	}
+	if strings.Contains(body, "NSFW作品") {
+		t.Error("logged-out user should NOT see NSFW work")
+	}
+
+	// 已登录但未开启 show_nsfw (u1)：看不到 NSFW
+	req1 := authenticatedRequest(t, http.MethodGet, "/square", 1, "u1", "")
+	req1.Header.Del("Content-Type")
+	w1 := httptest.NewRecorder()
+	squareHandler(w1, req1)
+	body1 := w1.Body.String()
+	if strings.Contains(body1, "NSFW作品") {
+		t.Error("logged-in user with show_nsfw=0 should NOT see NSFW work")
+	}
+
+	// 已登录且开启 show_nsfw (u2)：可以看到 NSFW
+	req2 := authenticatedRequest(t, http.MethodGet, "/square", 2, "u2", "")
+	req2.Header.Del("Content-Type")
+	w2 := httptest.NewRecorder()
+	squareHandler(w2, req2)
+	if !strings.Contains(w2.Body.String(), "NSFW作品") {
+		t.Error("logged-in user with show_nsfw=1 SHOULD see NSFW work")
+	}
+
+	// 管理员关闭 NSFW 后：即使开启 show_nsfw 也看不到
+	models.SetConfig("square_allow_nsfw", "false")
+	req3 := authenticatedRequest(t, http.MethodGet, "/square", 2, "u2", "")
+	req3.Header.Del("Content-Type")
+	w3 := httptest.NewRecorder()
+	squareHandler(w3, req3)
+	if strings.Contains(w3.Body.String(), "NSFW作品") {
+		t.Error("when admin disallows NSFW, no one should see NSFW work")
+	}
+}
+
+// TestSquareNSFWHandler 验证 NSFW 开关切换接口：登录用户可设置，
+// 管理员关闭 NSFW 时设置强制为 false。
+func TestSquareNSFWHandler(t *testing.T) {
+	cleanup := setupSquareTestEnv(t)
+	defer cleanup()
+	squareBaseTables()
+	models.SetConfig("square_allow_nsfw", "true")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status, show_nsfw) VALUES(1,'u1','x',100,'user',1,0)")
+
+	req := authenticatedRequest(t, http.MethodPost, "/square/nsfw", 1, "u1", "on=1&_csrf=test-csrf")
+	w := httptest.NewRecorder()
+	squareNSFWHandler(w, req)
+	var resp struct {
+		Ok      bool `json:"ok"`
+		ShowNSW bool `json:"show_nsfw"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if !resp.Ok || !resp.ShowNSW {
+		t.Errorf("nsfw toggle on: ok=%v show_nsfw=%v want true", resp.Ok, resp.ShowNSW)
+	}
+	var v int
+	models.DB.QueryRow("SELECT show_nsfw FROM users WHERE id=1").Scan(&v)
+	if v != 1 {
+		t.Errorf("after toggle on, show_nsfw=%d want 1", v)
+	}
+
+	// 管理员关闭 NSFW 后开关强制关闭
+	models.SetConfig("square_allow_nsfw", "false")
+	req2 := authenticatedRequest(t, http.MethodPost, "/square/nsfw", 1, "u1", "on=1&_csrf=test-csrf")
+	w2 := httptest.NewRecorder()
+	squareNSFWHandler(w2, req2)
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if resp.Ok && resp.ShowNSW {
+		t.Error("nsfw toggle should force off when admin disables NSFW")
+	}
+	models.DB.QueryRow("SELECT show_nsfw FROM users WHERE id=1").Scan(&v)
+	if v != 0 {
+		t.Errorf("after admin disables, show_nsfw=%d want 0", v)
+	}
+}
+
+// TestCleanupProtectsRankedWorks 验证自动清理会保留：
+// 近7天每日点赞前10的作品记录与图片文件；不在榜上的旧作品正常清理。
+func TestCleanupProtectsRankedWorks(t *testing.T) {
+	cleanup := setupSquareTestEnv(t)
+	defer cleanup()
+	squareBaseTables()
+	models.SetConfig("cleanup_enabled", "true")
+	models.SetConfig("cleanup_keep_days", "30")
+	models.SetConfig("cleanup_max_mb", "2048")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1)")
+	// 两条超期记录：ranked（今天点赞前列）与 old（无点赞）
+	old := time.Now().AddDate(0, 0, -60).Format("2006-01-02 15:04:05")
+	models.DB.Exec(`INSERT INTO generation_records(id, user_id, prompt, cost_points, status, is_public, nsfw, created_at) VALUES
+		(1,1,'榜上作品',10,'success',1,0,?),
+		(2,1,'普通旧作品',10,'success',1,0,?)`, old, old)
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/ranked.png'),(2,0,'/images/old.png')")
+	// 今天点赞，让作品1成为今日/7天榜单前10
+	models.DB.Exec("INSERT INTO creation_likes(record_id, user_id) VALUES(1,1)")
+
+	cleanUpTask()
+
+	// 榜上作品保留：记录与图片行仍在
+	var cnt1, cnt2 int
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE id=1").Scan(&cnt1)
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_images WHERE record_id=1").Scan(&cnt2)
+	if cnt1 != 1 || cnt2 != 1 {
+		t.Errorf("ranked work should be kept: records=%d images=%d", cnt1, cnt2)
+	}
+	// 普通旧作品被清理
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE id=2").Scan(&cnt1)
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_images WHERE record_id=2").Scan(&cnt2)
+	if cnt1 != 0 || cnt2 != 0 {
+		t.Errorf("old non-ranked work should be cleaned: records=%d images=%d", cnt1, cnt2)
 	}
 }

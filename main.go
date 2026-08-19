@@ -467,6 +467,8 @@ func main() {
 	}
 	// 启动自动清理任务：按保留天数 + 按磁盘上限（受后台设置控制）
 	go cleanupLoop()
+	// 启动每日点赞排行结算（每分检查，启动时补算最近 7 天）
+	go likeSettlementLoop()
 
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/login", rateLimited(loginHandler))
@@ -478,6 +480,13 @@ func main() {
 	http.HandleFunc("/profile", authMiddleware(profileHandler))
 	http.HandleFunc("/records", authMiddleware(recordsHandler))
 	http.HandleFunc("/records/delete", authMiddleware(recordDeleteHandler))
+	http.HandleFunc("/records/delete-failed", authMiddleware(recordDeleteFailedHandler))
+	http.HandleFunc("/records/publish", authMiddleware(recordPublishHandler))
+	// 创作广场：公开浏览（未登录可看作品与排行），点赞需登录
+	http.HandleFunc("/square", squareHandler)
+	http.HandleFunc("/square/user", squareUserHandler)
+	http.HandleFunc("/square/like", authMiddleware(squareLikeHandler))
+	http.HandleFunc("/square/nsfw", authMiddleware(squareNSFWHandler))
 	http.HandleFunc("/redeem", authMiddleware(rateLimited(redeemHandler)))
 	http.HandleFunc("/checkin", authMiddleware(checkinHandler))
 	http.HandleFunc("/points", authMiddleware(pointsHandler))
@@ -1423,6 +1432,7 @@ var systemLogActions = map[string]string{
 	"redeem":            "兑换",
 	"api":               "API 调用",
 	"refund":            "积分退回",
+	"like_award":        "点赞排行奖励",
 	"admin_rename":      "管理员操作",
 	"admin_password":    "重置密码",
 	"admin_oauth":       "调整第三方绑定",
@@ -1621,6 +1631,9 @@ func createPage(w http.ResponseWriter, r *http.Request, extra map[string]interfa
 		if v, ok := sess.Values["lastModel"].(string); ok && v != "" {
 			data["LastModel"] = v
 		}
+		if v, ok := sess.Values["lastIsPublic"].(string); ok {
+			data["LastIsPublic"] = v
+		}
 	}
 	// 从 /records 点「再生成」带过来的提示词，直接回填到表单
 	if p := strings.TrimSpace(r.URL.Query().Get("prompt")); p != "" {
@@ -1708,6 +1721,8 @@ func createPage(w http.ResponseWriter, r *http.Request, extra map[string]interfa
 		}
 	}
 	data["DefModel"] = defModel
+	data["AllowSquareNSFW"] = squareAllowNSFW()
+	data["SquareEnabled"] = squareEnabled()
 	data["RecentTasks"] = recentTasks(uid, 3)
 	for k, v := range extra {
 		data[k] = v
@@ -1792,6 +1807,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		sess.Values["lastResolution"] = lastResolution
 		sess.Values["lastN"] = lastN
 		sess.Values["lastModel"] = lastModel
+		sess.Values["lastIsPublic"] = r.FormValue("is_public")
 		sess.Save(r, w)
 	}
 	n := atoiDefault(lastN, 1)
@@ -1924,8 +1940,17 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 生成随机任务编号（对外展示，不暴露自增 ID）
 	taskKey := models.RandomTaskKey()
-	res, err = models.DB.Exec("INSERT INTO generation_records(user_id, prompt, model, n, aspect_ratio, resolution, response_format, cost_points, status, nsfw, channel, task_key) VALUES(?,?,?,?,?,?,?,?,'processing',?,?,?)",
-		userID, lastPrompt, chanModel, n, lastRatio, lastResolution, lastFormat, cost, nsfwFlag, selectedEp.Name, taskKey)
+	// 是否发布到创作广场：默认发布；发布仅对成功记录生效（广场只展示成功作品）。
+	// 管理员未允许 NSFW 发布到广场时，NSFW 记录强制不发布（即使勾选也不生效）。
+	isPublic := 1
+	if strings.TrimSpace(r.FormValue("is_public")) != "1" {
+		isPublic = 0
+	}
+	if nsfwFlag == 1 && !squareAllowNSFW() {
+		isPublic = 0
+	}
+	res, err = models.DB.Exec("INSERT INTO generation_records(user_id, prompt, model, n, aspect_ratio, resolution, response_format, cost_points, status, nsfw, channel, task_key, is_public) VALUES(?,?,?,?,?,?,?,?,'processing',?,?,?,?)",
+		userID, lastPrompt, chanModel, n, lastRatio, lastResolution, lastFormat, cost, nsfwFlag, selectedEp.Name, taskKey, isPublic)
 	if err != nil {
 		// 扣款成功但记录落库失败：立即退回积分，避免"扣了分却没记录"
 		models.DB.Exec("UPDATE users SET points = points + ? WHERE id=?", cost, userID)
@@ -2414,7 +2439,9 @@ func processGeneration(recordID int64) {
 		markTaskFailed(recordID, "生成成功但图片归档失败，请重试", false)
 		return
 	}
-	updRes, _ := models.DB.Exec("UPDATE generation_records SET status='success', image_url=?, channel=? WHERE id=? AND status='processing'",
+	updRes, _ := models.DB.Exec(`UPDATE generation_records SET status='success', image_url=?, channel=?,
+		published_at = CASE WHEN is_public=1 THEN COALESCE(published_at, CURRENT_TIMESTAMP) ELSE published_at END
+		WHERE id=? AND status='processing'`,
 		imageURL, ep.Name, recordID)
 	if rowsAffected(updRes) == 0 {
 		return // 记录不在了或已被并发处理，不归档图片
@@ -2476,6 +2503,45 @@ func markTaskFailed(recordID int64, msg string, is504 bool) {
 	}
 }
 
+// protectedSquareRecordIDs 计算自动清理时需要保留的作品 ID 集合：
+// 近 7 天中每一天的点赞前 10 作品 + 近 7 天总点赞前 10 作品。
+// 这些榜上作品的记录与图片文件在清理时一律保留（防掉榜后作品被清掉）。
+func protectedSquareRecordIDs() map[int64]bool {
+	prot := map[int64]bool{}
+	now := time.Now().In(beijingTZ)
+	// 近 7 天每日点赞前 10
+	for i := 0; i < 7; i++ {
+		day := now.AddDate(0, 0, -i).Format("2006-01-02")
+		rows, err := models.DB.Query(`SELECT record_id FROM creation_likes
+			WHERE date(created_at, '+8 hours') = ?
+			GROUP BY record_id ORDER BY COUNT(*) DESC, MIN(id) ASC LIMIT 10`, day)
+		if err == nil {
+			for rows.Next() {
+				var rid int64
+				if rows.Scan(&rid) == nil {
+					prot[rid] = true
+				}
+			}
+			rows.Close()
+		}
+	}
+	// 近 7 天总点赞前 10
+	start := now.AddDate(0, 0, -6).Format("2006-01-02")
+	rows, err := models.DB.Query(`SELECT record_id FROM creation_likes
+		WHERE date(created_at, '+8 hours') >= ?
+		GROUP BY record_id ORDER BY COUNT(*) DESC, MIN(id) ASC LIMIT 10`, start)
+	if err == nil {
+		for rows.Next() {
+			var rid int64
+			if rows.Scan(&rid) == nil {
+				prot[rid] = true
+			}
+		}
+		rows.Close()
+	}
+	return prot
+}
+
 // cleanUpTask 执行一次自动清理：同时受"保留天数"与"磁盘上限"两个规则
 // 约束，任一规则触发都会清理；两者都未启用时直接跳过。
 // 规则（后台设置）：
@@ -2484,6 +2550,8 @@ func markTaskFailed(recordID int64, msg string, is504 bool) {
 //     已上传外部存储的图片保留记录与备用地址，仅移除本地文件）
 //   - cleanup_max_mb    data/images 目录超过该大小（MB）时，按旧到新
 //     删除本地图片文件直到低于上限
+// 保护规则：近 7 天每日点赞前 10 / 7 天点赞前 10 的作品不清理（保留
+// 记录与图片文件，见 protectedSquareRecordIDs）。
 func cleanUpTask() {
 	if v, _ := models.GetConfig("cleanup_enabled"); v != "true" {
 		return
@@ -2492,6 +2560,8 @@ func cleanUpTask() {
 	maxMB := atoiDefault(models.GetConfigOr("cleanup_max_mb", "2048"), 2048)
 	now := time.Now()
 	cutoff := now.AddDate(0, 0, -keepDays)
+	// 榜上作品保护集合（仅计算一次，两条规则共用）
+	protected := protectedSquareRecordIDs()
 
 	// ---------- 规则一：按保留天数 ----------
 	// 找出超期记录：本地文件未上传外部存储的直接删记录+文件；
@@ -2527,6 +2597,9 @@ func cleanUpTask() {
 		}
 		rows.Close()
 		for _, d := range byRid {
+			if protected[d.rid] {
+				continue // 榜上作品：保留记录与图片，不参与天数清理
+			}
 			removeLocalFiles(d.paths)
 			if len(d.refs) == 0 {
 				// 无外部存储备份：记录一并删除
@@ -2569,6 +2642,9 @@ func cleanUpTask() {
 			var p, ref string
 			if rows2.Scan(&rid, &p, &ref, &giID) != nil {
 				continue
+			}
+			if protected[rid] {
+				continue // 榜上作品：保留记录与图片，不参与磁盘上限清理
 			}
 			sz := fileSize("data" + p)
 			removeLocalFiles([]string{p})
@@ -2726,6 +2802,9 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var total int
 	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records "+base, args...).Scan(&total)
+	// 失败记录总数（“一键删除失败记录”按钮的显示依据）
+	var failedCount int
+	models.DB.QueryRow("SELECT COUNT(*) FROM generation_records WHERE user_id=? AND status='failed'", userID).Scan(&failedCount)
 	totalPages := (total + perPage - 1) / perPage
 	if totalPages < 1 {
 		totalPages = 1
@@ -2733,7 +2812,7 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 	if page > totalPages {
 		page = totalPages
 	}
-	rows, err := models.DB.Query("SELECT id, task_key, prompt, model, n, aspect_ratio, resolution, cost_points, status, image_url, error_msg, channel, created_at FROM generation_records "+base+" ORDER BY id DESC LIMIT ? OFFSET ?",
+	rows, err := models.DB.Query("SELECT id, task_key, prompt, model, n, aspect_ratio, resolution, cost_points, status, image_url, error_msg, channel, created_at, is_public FROM generation_records "+base+" ORDER BY id DESC LIMIT ? OFFSET ?",
 		append(args, perPage, (page-1)*perPage)...)
 	if err != nil {
 		http.Error(w, "查询失败", http.StatusInternalServerError)
@@ -2744,7 +2823,8 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var rec models.GenerationRecord
 		var errMsg, channel, taskKey string
-		if err := rows.Scan(&rec.ID, &taskKey, &rec.Prompt, &rec.Model, &rec.N, &rec.AspectRatio, &rec.Resolution, &rec.CostPoints, &rec.Status, &rec.ImageURL, &errMsg, &channel, &rec.CreatedAt); err == nil {
+		var isPublic int
+		if err := rows.Scan(&rec.ID, &taskKey, &rec.Prompt, &rec.Model, &rec.N, &rec.AspectRatio, &rec.Resolution, &rec.CostPoints, &rec.Status, &rec.ImageURL, &errMsg, &channel, &rec.CreatedAt, &isPublic); err == nil {
 			recs = append(recs, map[string]interface{}{
 				"ID":          rec.ID,
 				"TaskKey":     taskKey,
@@ -2758,6 +2838,7 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 				"ImageURL":    rec.ImageURL,
 				"ErrorMsg":    errMsg,
 				"Channel":     channel,
+				"IsPublic":    isPublic == 1,
 				"CreatedAt":   rec.CreatedAt.In(beijingTZ).Format("2006-01-02 15:04:05"),
 			})
 		}
@@ -2830,6 +2911,7 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 		"Query":      q,
 		"Records":    recs,
 		"TotalCost":  totalCost,
+		"FailedCount": failedCount,
 		"Page":       page,
 		"TotalPages": totalPages,
 		"Total":      total,
@@ -2869,6 +2951,7 @@ func collectRecordAssets(recordID string) (paths, remoteRefs []string) {
 // 自然跳过），供用户端与管理端删除记录共用。
 func removeRecordAssets(recordID string, paths, remoteRefs []string) {
 	models.DB.Exec("DELETE FROM generation_images WHERE record_id=?", recordID)
+	models.DB.Exec("DELETE FROM creation_likes WHERE record_id=?", recordID)
 	for _, p := range paths {
 		if strings.HasPrefix(p, "/images/") {
 			os.Remove("data" + p)
@@ -2925,6 +3008,568 @@ func recordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	flashRedirect(w, r, target, "已删除该创作记录")
+}
+
+// recordDeleteFailedHandler 一键删除当前用户全部失败记录（含归档图片与点赞数据）。
+// 失败记录可能残留少量积分扣减明细外的文件，一并清理，便于用户整理创作记录页。
+func recordDeleteFailedHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !verifyCSRF(r) {
+		http.Redirect(w, r, "/records", http.StatusSeeOther)
+		return
+	}
+	userID, _, _ := currentUser(r)
+	rows, err := models.DB.Query("SELECT id FROM generation_records WHERE user_id=? AND status='failed'", userID)
+	if err != nil {
+		http.Error(w, "查询失败", http.StatusInternalServerError)
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, strconv.FormatInt(id, 10))
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		paths, remoteRefs := collectRecordAssets(id)
+		if _, err := models.DB.Exec("DELETE FROM generation_records WHERE id=? AND user_id=? AND status='failed'", id, userID); err == nil {
+			removeRecordAssets(id, paths, remoteRefs)
+		}
+	}
+	flashRedirect(w, r, "/records", fmt.Sprintf("已删除 %d 条失败记录", len(ids)))
+}
+
+// recordPublishHandler 切换创作记录的发布状态（发布/取消发布到创作广场）。
+// 只有成功记录可以发布（广场只展示成功作品）；管理员关闭 NSFW 广场发布时，
+// NSFW 作品不可发布。
+func recordPublishHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !verifyCSRF(r) {
+		http.Redirect(w, r, "/records", http.StatusSeeOther)
+		return
+	}
+	if !squareEnabled() {
+		http.Error(w, "创作广场已关闭", http.StatusBadRequest)
+		return
+	}
+	userID, _, _ := currentUser(r)
+	rawID := r.FormValue("id")
+	recordID, err := resolveRecordID(rawID, userID)
+	if err != nil {
+		http.Error(w, "记录不存在", http.StatusNotFound)
+		return
+	}
+	publish := 0
+	if r.FormValue("publish") == "1" {
+		publish = 1
+	}
+	// 尝试发布时：NSFW 作品需要管理员允许才能发布到广场
+	if publish == 1 && !squareAllowNSFW() {
+		var nsfw int
+		models.DB.QueryRow("SELECT nsfw FROM generation_records WHERE id=?", recordID).Scan(&nsfw)
+		if nsfw == 1 {
+			http.Error(w, "管理员尚未允许 NSFW 作品发布到创作广场", http.StatusBadRequest)
+			return
+		}
+	}
+	// 发布必须为成功记录；取消发布任意状态都可
+	res, err := models.DB.Exec(`UPDATE generation_records
+		SET is_public=?, published_at = CASE WHEN ?=1 AND status='success' THEN COALESCE(published_at, CURRENT_TIMESTAMP) ELSE published_at END
+		WHERE id=? AND user_id=? AND (?=0 OR status='success')`,
+		publish, publish, recordID, userID, publish)
+	if err == nil {
+		if affected, _ := res.RowsAffected(); affected == 0 {
+			http.Error(w, "记录不存在或不可发布（仅成功记录可发布到广场）", http.StatusBadRequest)
+			return
+		}
+	}
+	target := "/records"
+	if ref := r.Referer(); ref != "" {
+		if u, err := url.Parse(ref); err == nil {
+			qp := u.Query()
+			if p := qp.Get("page"); p != "" {
+				target += "?page=" + p
+			}
+			if byQ := qp.Get("q"); byQ != "" {
+				sep := "?"
+				if strings.Contains(target, "?") {
+					sep = "&"
+				}
+				target += sep + "q=" + url.QueryEscape(byQ)
+			}
+		}
+	}
+	if publish == 1 {
+		flashRedirect(w, r, target, "已发布到创作广场")
+	} else {
+		flashRedirect(w, r, target, "已取消发布")
+	}
+}
+
+// ------- 创作广场 -------
+
+// squareEnabled 判断创作广场整体开关（后台设置）。
+func squareEnabled() bool {
+	return models.GetConfigOr("square_enabled", "true") == "true"
+}
+
+// squareAllowNSFW 判断管理员是否允许 NSFW 作品发布到广场。
+func squareAllowNSFW() bool {
+	return models.GetConfigOr("square_allow_nsfw", "false") == "true"
+}
+
+// viewerShowNSFW 判断当前浏览者是否可以看到 NSFW 广场作品：
+// 必须管理员允许 NSFW 发布、且用户已登录并主动开启「显示 NSFW」。
+// 未登录用户永远看不到 NSFW（无法开启）。
+func viewerShowNSFW(r *http.Request) bool {
+	if !squareAllowNSFW() {
+		return false
+	}
+	uid, _, _ := currentUser(r)
+	if uid <= 0 {
+		return false
+	}
+	var v int
+	models.DB.QueryRow("SELECT show_nsfw FROM users WHERE id=?", uid).Scan(&v)
+	return v == 1
+}
+
+// squareBaseWhere 是创作广场作品的公共查询条件：只展示成功、已发布、
+// 创作人仍为正常状态、且图片仍存在（本地或外部备份，未被清理/deleted）的作品。
+// showNSFW 为 true 时不排除 NSFW 作品（仅登录用户开启后生效）。
+func squareBaseWhere(showNSFW bool) string {
+	sqlWhere := "gr.status='success' AND gr.is_public=1 AND u.status=1"
+	if !showNSFW {
+		sqlWhere += " AND gr.nsfw=0"
+	}
+	// 广场不展示已删除、已被清理的作品：必须仍存在至少一张可用图片
+	// （本地路径或外部存储备份，二选一非空）。
+	sqlWhere += " AND EXISTS (SELECT 1 FROM generation_images gi WHERE gi.record_id=gr.id AND (gi.path != '' OR gi.storage_path != ''))"
+	return sqlWhere
+}
+
+// squareCards 查询创作广场作品列表（含封面图、点赞数与当前用户是否已点赞）。
+// page 超出范围时自动收敛到最后一页。
+func squareCards(r *http.Request, where, order string, args []interface{}, page, perPage int) ([]map[string]interface{}, int) {
+	list := []map[string]interface{}{}
+	var total int
+	if err := models.DB.QueryRow("SELECT COUNT(*) FROM generation_records gr JOIN users u ON u.id=gr.user_id WHERE "+where, args...).Scan(&total); err != nil {
+		return list, 0
+	}
+	totalPages := (total + perPage - 1) / perPage
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	uid, _, _ := currentUser(r)
+	rows, err := models.DB.Query("SELECT gr.id, gr.task_key, gr.prompt, u.username, gr.created_at, gr.nsfw FROM generation_records gr JOIN users u ON u.id=gr.user_id WHERE "+where+" ORDER BY "+order+" LIMIT ? OFFSET ?",
+		append(args, perPage, (page-1)*perPage)...)
+	if err != nil {
+		return list, total
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var taskKey, prompt, username, createdAt string
+		var nsfw int
+		if rows.Scan(&id, &taskKey, &prompt, &username, &createdAt, &nsfw) == nil {
+			list = append(list, map[string]interface{}{
+				"ID":        id,
+				"TaskKey":   taskKey,
+				"Prompt":    prompt,
+				"PromptCut": truncateRunes(prompt, 120),
+				"ImageURL":  "",
+				"Nsfw":      nsfw == 1,
+				"Username":  username,
+				"CreatedAt": localTime(createdAt),
+			})
+			ids = append(ids, id)
+		}
+	}
+	// 每张作品的封面图：优选本地路径，其次外部存储备份地址
+	coverURL := map[int64]string{}
+	if len(ids) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		rowArgs := make([]interface{}, len(ids))
+		for i, rid := range ids {
+			rowArgs[i] = rid
+		}
+		rowsImg, err := models.DB.Query("SELECT record_id, path, storage_path FROM generation_images WHERE record_id IN ("+placeholders+") ORDER BY record_id, idx",
+			rowArgs...)
+		if err == nil {
+			for rowsImg.Next() {
+				var rid int64
+				var p, sp string
+				if rowsImg.Scan(&rid, &p, &sp) == nil {
+					if _, ok := coverURL[rid]; !ok {
+						if p != "" {
+							coverURL[rid] = p
+						} else if sp != "" {
+							coverURL[rid] = sp
+						}
+					}
+				}
+			}
+			rowsImg.Close()
+		}
+	}
+	if len(ids) == 0 {
+		return list, total
+	}
+	// 聚合本页作品的点赞数
+	likeCount := map[int64]int64{}
+	rowsL, err := models.DB.Query("SELECT record_id, COUNT(*) FROM creation_likes WHERE record_id IN (SELECT id FROM generation_records WHERE "+where+" ORDER BY "+order+" LIMIT ? OFFSET ?) GROUP BY record_id",
+		append(args, perPage, (page-1)*perPage)...)
+	if err == nil {
+		for rowsL.Next() {
+			var rid, cnt int64
+			if rowsL.Scan(&rid, &cnt) == nil {
+				likeCount[rid] = cnt
+			}
+		}
+		rowsL.Close()
+	}
+	// 当前用户是否已点赞本页作品
+	likedSet := map[int64]bool{}
+	if uid > 0 {
+		rowsM, err := models.DB.Query("SELECT record_id FROM creation_likes WHERE user_id=? AND record_id IN (SELECT id FROM generation_records WHERE "+where+" ORDER BY "+order+" LIMIT ? OFFSET ?)",
+			append(append([]interface{}{uid}, args...), perPage, (page-1)*perPage)...)
+		if err == nil {
+			for rowsM.Next() {
+				var rid int64
+				if rowsM.Scan(&rid) == nil {
+					likedSet[rid] = true
+				}
+			}
+			rowsM.Close()
+		}
+	}
+	for _, item := range list {
+		id := item["ID"].(int64)
+		item["LikeCount"] = likeCount[id]
+		item["Liked"] = likedSet[id]
+		item["ImageURL"] = coverURL[id]
+	}
+	return list, total
+}
+
+// likeRanking 计算点赞排行榜：kind = "daily" 按北京时间的当天点赞数排名，
+// kind = "week" 按最近 7 天点赞数排名；返回含排名/用户名/点赞数的列表。
+func likeRanking(kind string, limit int) []map[string]interface{} {
+	rankings := []map[string]interface{}{}
+	now := time.Now().In(beijingTZ)
+	var sqlWhere string
+	switch kind {
+	case "daily":
+		today := now.Format("2006-01-02")
+		sqlWhere = "date(l.created_at, '+8 hours') = '" + today + "'"
+	case "week":
+		start := now.AddDate(0, 0, -6).Format("2006-01-02")
+		sqlWhere = "date(l.created_at, '+8 hours') >= '" + start + "'"
+	default:
+		return rankings
+	}
+	rows, err := models.DB.Query(`SELECT u.username, COUNT(*) AS cnt
+		FROM creation_likes l JOIN users u ON u.id=l.user_id
+		WHERE u.status=1 AND `+sqlWhere+`
+		GROUP BY l.user_id ORDER BY cnt DESC, l.user_id ASC LIMIT ?`, limit)
+	if err != nil {
+		return rankings
+	}
+	defer rows.Close()
+	rank := 0
+	for rows.Next() {
+		var name string
+		var cnt int64
+		if rows.Scan(&name, &cnt) == nil && cnt > 0 {
+			rank++
+			rankings = append(rankings, map[string]interface{}{
+				"Rank":  rank,
+				"Name":  name,
+				"Count": cnt,
+			})
+		}
+	}
+	return rankings
+}
+
+// squareHandler 创作广场主页：展示发布到广场的作品流 + 每日/7 天点赞排行榜。
+// 广场关闭时展示关闭提示（导航/链接仍可进入以说明状态）。
+func squareHandler(w http.ResponseWriter, r *http.Request) {
+	if !squareEnabled() {
+		renderPublicPage(w, r, "创作广场", "content-square", map[string]interface{}{
+			"SquareDisabled": true,
+		})
+		return
+	}
+	const perPage = 12
+	page := atoiDefault(r.URL.Query().Get("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	showNSFW := viewerShowNSFW(r)
+	where := squareBaseWhere(showNSFW)
+	order := "gr.id DESC"
+	cards, total := squareCards(r, where, order, nil, page, perPage)
+	totalPages := (total + perPage - 1) / perPage
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	redirectBack := "/square"
+	if showNSFW {
+		redirectBack = "/square?nsfw=1"
+	}
+	renderPublicPage(w, r, "创作广场", "content-square", map[string]interface{}{
+		"Cards":         cards,
+		"Total":         total,
+		"Page":          page,
+		"TotalPages":    totalPages,
+		"HasPrev":       page > 1,
+		"HasNext":       page < totalPages,
+		"PrevPage":      page - 1,
+		"NextPage":      page + 1,
+		"PageBase":      "/square?",
+		"DailyRanking":  likeRanking("daily", 10),
+		"WeekRanking":   likeRanking("week", 10),
+		"AllowNSFW":     squareAllowNSFW(),
+		"ShowNSFW":      showNSFW,
+		"BackAfterNSFW": redirectBack,
+	})
+}
+
+// squareUserHandler 创作人主页：展示该用户发布到广场的全部作品。
+// 未发布到广场的记录对其他用户不可见。
+func squareUserHandler(w http.ResponseWriter, r *http.Request) {
+	if !squareEnabled() {
+		renderPublicPage(w, r, "创作广场", "content-square", map[string]interface{}{
+			"SquareDisabled": true,
+		})
+		return
+	}
+	username := strings.TrimSpace(r.URL.Query().Get("u"))
+	if username == "" {
+		http.Redirect(w, r, "/square", http.StatusSeeOther)
+		return
+	}
+	// 用户必须存在且为正常状态
+	var userID int64
+	var role string
+	err := models.DB.QueryRow("SELECT id, role FROM users WHERE username=? AND status=1", username).Scan(&userID, &role)
+	if err != nil {
+		renderError(w, r, "404", "该创作人不存在或已注销")
+		return
+	}
+	const perPage = 12
+	page := atoiDefault(r.URL.Query().Get("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	showNSFW := viewerShowNSFW(r)
+	where := squareBaseWhere(showNSFW) + " AND gr.user_id=?"
+	order := "gr.id DESC"
+	cards, total := squareCards(r, where, order, []interface{}{userID}, page, perPage)
+	totalPages := (total + perPage - 1) / perPage
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	renderPublicPage(w, r, username+" 的作品", "content-square-user", map[string]interface{}{
+		"Cards":         cards,
+		"SquareUser":    username,
+		"Total":         total,
+		"Page":          page,
+		"TotalPages":    totalPages,
+		"HasPrev":       page > 1,
+		"HasNext":       page < totalPages,
+		"PrevPage":      page - 1,
+		"NextPage":      page + 1,
+		"PageBase":      "/square/user?u=" + url.QueryEscape(username) + "&",
+		"AllowNSFW":     squareAllowNSFW(),
+		"ShowNSFW":      showNSFW,
+		"BackAfterNSFW": "/square/user?u=" + url.QueryEscape(username) + "&nsfw=1",
+	})
+}
+
+// squareLikeHandler 点赞/取消点赞广场作品：每个作品每个用户只能点一次赞
+// （再次点击取消）。不能给自己的作品点赞。异步返回 JSON。
+func squareLikeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"ok": false, "error": "method not allowed"})
+		return
+	}
+	if !verifyCSRF(r) {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "表单已过期，请刷新页面后重试"})
+		return
+	}
+	if !squareEnabled() {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "创作广场已关闭"})
+		return
+	}
+	userID, _, _ := currentUser(r)
+	recordID, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || recordID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "参数错误"})
+		return
+	}
+	// 记录必须存在、成功、已发布，且不是自己的作品
+	var ownerID int64
+	err = models.DB.QueryRow("SELECT user_id FROM generation_records WHERE id=? AND status='success' AND is_public=1", recordID).Scan(&ownerID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]interface{}{"ok": false, "error": "作品不存在或不可点赞"})
+		return
+	}
+	if ownerID == userID {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "不能给自己的作品点赞"})
+		return
+	}
+	// 原子切换：已点赞则取消，未点赞则插入（UNIQUE(record_id,user_id) 防重复）
+	tx, err := models.DB.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "系统繁忙，请重试"})
+		return
+	}
+	var exists int
+	tx.QueryRow("SELECT COUNT(*) FROM creation_likes WHERE record_id=? AND user_id=?", recordID, userID).Scan(&exists)
+	liked := true
+	if exists > 0 {
+		if _, err := tx.Exec("DELETE FROM creation_likes WHERE record_id=? AND user_id=?", recordID, userID); err != nil {
+			tx.Rollback()
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "操作失败，请重试"})
+			return
+		}
+		liked = false
+	} else {
+		if _, err := tx.Exec("INSERT INTO creation_likes(record_id, user_id) VALUES(?,?)", recordID, userID); err != nil {
+			tx.Rollback()
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "操作失败，请重试"})
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "系统繁忙，请重试"})
+		return
+	}
+	var count int64
+	models.DB.QueryRow("SELECT COUNT(*) FROM creation_likes WHERE record_id=?", recordID).Scan(&count)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "liked": liked, "count": count})
+}
+
+// squareNSFWHandler 切换当前登录用户的「显示 NSFW 广场作品」偏好：
+// 管理员未允许 NSFW 时强制关闭；仅登录用户可设置（未登录由中间件拦截）。
+func squareNSFWHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"ok": false, "error": "method not allowed"})
+		return
+	}
+	if !verifyCSRF(r) {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "表单已过期，请刷新页面后重试"})
+		return
+	}
+	userID, _, _ := currentUser(r)
+	on := r.FormValue("on") == "1"
+	if !squareAllowNSFW() {
+		on = false // 管理员关闭 NSFW 时不允许开启
+	}
+	if _, err := models.DB.Exec("UPDATE users SET show_nsfw=? WHERE id=?", bool2int(on), userID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "设置失败，请重试"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "show_nsfw": on})
+}
+
+// bool2int 将布尔值转换为 0/1。
+func bool2int(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// settleLikeRanking 结算指定北京日期（YYYY-MM-DD）的每日点赞排行：
+// 点赞数前 5 名分别获得 300/200/100/50/50 积分。
+// 幂等：已结算日期（like_daily_awards 已有记录）直接跳过。
+func settleLikeRanking(date string) {
+	var done int
+	models.DB.QueryRow("SELECT COUNT(*) FROM like_daily_awards WHERE date=?", date).Scan(&done)
+	if done > 0 {
+		return
+	}
+	rows, err := models.DB.Query(`SELECT l.user_id, u.username, COUNT(*) AS cnt
+		FROM creation_likes l JOIN users u ON u.id=l.user_id
+		WHERE u.status=1 AND date(l.created_at, '+8 hours') = ?
+		GROUP BY l.user_id ORDER BY cnt DESC, l.user_id ASC LIMIT 5`, date)
+	if err != nil {
+		log.Printf("like ranking settle: %v", err)
+		return
+	}
+	awards := []int{300, 200, 100, 50, 50}
+	type award struct {
+		uid  int64
+		name string
+		cnt  int64
+	}
+	var winners []award
+	rank := 0
+	for rows.Next() {
+		var a award
+		if rows.Scan(&a.uid, &a.name, &a.cnt) == nil && a.cnt > 0 {
+			rank++
+			if rank <= len(awards) {
+				winners = append(winners, a)
+			}
+		}
+	}
+	rows.Close()
+	for i, a := range winners {
+		pts := awards[i]
+		// 同一用户同一日期的奖励唯一（幂等）
+		if _, err := models.DB.Exec("INSERT OR IGNORE INTO like_daily_awards(date, user_id, username, like_count, rank, points) VALUES(?,?,?,?,?,?)",
+			date, a.uid, a.name, a.cnt, i+1, pts); err != nil {
+			log.Printf("like ranking award insert: %v", err)
+			continue
+		}
+		if _, err := models.DB.Exec("UPDATE users SET points = points + ? WHERE id=?", pts, a.uid); err != nil {
+			log.Printf("like ranking award points: %v", err)
+			continue
+		}
+		logPoints(a.uid, int64(pts), fmt.Sprintf("每日点赞排行第%d名奖励", i+1))
+		systemLog(nil, a.uid, a.name, "like_award", fmt.Sprintf("每日点赞排行第%d名，奖励 %d 积分", i+1, pts), int64(pts))
+		log.Printf("like ranking settled: date=%s user=%s rank=%d points=%d", date, a.name, i+1, pts)
+	}
+}
+
+// likeSettlementLoop 定时结算每日点赞排行：每分钟检查一次北京时间是否
+// 跨过零点；启动时补算最近 7 天未结算的日期（服务器宕机/跨天不丢结算）。
+func likeSettlementLoop() {
+	// 启动补算：最近 7 天（含昨天）未结算的日期
+	now := time.Now().In(beijingTZ)
+	for i := 1; i <= 7; i++ {
+		d := now.AddDate(0, 0, -i).Format("2006-01-02")
+		settleLikeRanking(d)
+	}
+	lastDate := now.Format("2006-01-02")
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		cur := time.Now().In(beijingTZ).Format("2006-01-02")
+		if cur != lastDate {
+			// 跨天：结算昨天的排行
+			yesterday := time.Now().In(beijingTZ).AddDate(0, 0, -1).Format("2006-01-02")
+			settleLikeRanking(yesterday)
+			lastDate = cur
+		}
+	}
 }
 
 // adminRecordsHandler 创作记录审查页：展示所有用户的创作记录与生成图片，
@@ -3904,6 +4549,9 @@ func adminUserDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, stmt := range []string{
 		"DELETE FROM generation_images WHERE record_id IN (SELECT id FROM generation_records WHERE user_id=?)",
+		"DELETE FROM creation_likes WHERE record_id IN (SELECT id FROM generation_records WHERE user_id=?)",
+		"DELETE FROM creation_likes WHERE user_id=?",
+		"DELETE FROM like_daily_awards WHERE user_id=?",
 		"DELETE FROM generation_records WHERE user_id=?",
 		"DELETE FROM checkin_logs WHERE user_id=?",
 		"DELETE FROM points_log WHERE user_id=?",
@@ -4222,7 +4870,7 @@ func adminUpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	// settings_pane 由页面 JS 随表单提交，非法值一律忽略
 	pane := r.FormValue("settings_pane")
 	switch pane {
-	case "basic", "register", "checkin", "endpoints", "oauth", "storage", "cleanup", "about":
+	case "basic", "register", "checkin", "endpoints", "oauth", "storage", "cleanup", "square", "about":
 	default:
 		pane = ""
 	}

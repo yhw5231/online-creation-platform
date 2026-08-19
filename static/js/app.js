@@ -1020,4 +1020,113 @@
       });
     });
   })();
+
+  /* ---------- 创作广场：点赞交互 ---------- */
+  (function squareLikes() {
+    document.querySelectorAll('.like-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        if (btn.getAttribute('data-owner') === 'self') {
+          showToast('不能给自己的作品点赞', 'error');
+          return;
+        }
+        var recordId = btn.getAttribute('data-record-id');
+        var csrf = btn.getAttribute('data-csrf');
+        var action = '/square/like';
+        var formData = new FormData();
+        formData.append('id', recordId);
+        formData.append('_csrf', csrf);
+        fetch(action, {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          body: formData,
+          credentials: 'same-origin'
+        }).then(function (resp) {
+          if (resp.redirected) { location.href = resp.url; return null; }
+          return resp.json();
+        }).then(function (data) {
+          if (!data) return;
+          if (data.ok) {
+            var liked = data.liked;
+            var count = data.count;
+            btn.setAttribute('data-liked', liked ? '1' : '0');
+            btn.setAttribute('aria-pressed', liked ? 'true' : 'false');
+            btn.classList.toggle('liked', liked);
+            var svg = btn.querySelector('svg');
+            if (svg) svg.setAttribute('fill', liked ? 'currentColor' : 'none');
+            var countEl = btn.querySelector('.like-count');
+            if (countEl) countEl.textContent = count;
+            showToast(liked ? '已点赞' : '已取消点赞', 'success');
+          } else {
+            showToast(data.error || '操作失败', 'error');
+          }
+        }).catch(function () {
+          showToast('网络异常，请重试', 'error');
+        });
+      });
+    });
+  })();
+})();
+
+/* ---------- 创作广场：NSFW 显示开关 ---------- */
+(function nsfwToggle() {
+  var toggle = document.getElementById('nsfwToggle');
+  if (!toggle) return;
+  var csrf = toggle.getAttribute('data-csrf');
+  var label = document.querySelector('label[for="nsfwToggle"]');
+  toggle.addEventListener('change', function () {
+    var on = toggle.checked ? '1' : '0';
+    var formData = new FormData();
+    formData.append('on', on);
+    formData.append('_csrf', csrf);
+    fetch('/square/nsfw', {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      body: formData,
+      credentials: 'same-origin'
+    }).then(function (resp) {
+      if (resp.redirected) { location.href = resp.url; return null; }
+      return resp.json();
+    }).then(function (data) {
+      if (!data) return;
+      if (data.ok) {
+        if (label) label.textContent = data.show_nsfw ? '已开启' : '已关闭';
+        // 刷新页面以应用新的 NSFW 过滤
+        location.reload();
+      } else {
+        showToast(data.error || '操作失败', 'error');
+        toggle.checked = !toggle.checked;
+      }
+    }).catch(function () {
+      showToast('网络异常，请重试', 'error');
+      toggle.checked = !toggle.checked;
+    });
+  });
+})();
+
+/* ---------- 创作页：NSFW 渠道提示 ---------- */
+(function nsfwCreateHint() {
+  var channelSelect = document.getElementById('channelSelect');
+  var isPublicLabel = document.querySelector('label[for="isPublic"]');
+  var isPublicCheck = document.getElementById('isPublic');
+  if (!channelSelect || !isPublicLabel) return;
+  var nsfwLink = isPublicLabel.querySelector('strong');
+  var hint = document.createElement('span');
+  hint.className = 'text-warning small d-block mt-1';
+  hint.style.display = 'none';
+  hint.textContent = '当前为 NSFW 渠道，管理员未允许 NSFW 作品发布到创作广场，取消勾选。';
+  isPublicLabel.appendChild(hint);
+  function updateHint() {
+    var opt = channelSelect.options[channelSelect.selectedIndex];
+    var isNsfw = opt && opt.getAttribute('data-nsfw') === 'true';
+    var squareNsfwAllowed = document.querySelector('form[data-submit]')?.getAttribute('data-square-nsfw') === '1';
+    if (isNsfw && !squareNsfwAllowed) {
+      hint.style.display = 'block';
+      if (isPublicCheck) { isPublicCheck.checked = false; isPublicCheck.disabled = true; }
+    } else {
+      hint.style.display = 'none';
+      if (isPublicCheck) { isPublicCheck.disabled = false; }
+    }
+  }
+  updateHint();
+  channelSelect.addEventListener('change', updateHint);
 })();

@@ -133,6 +133,55 @@ a.link-primary { color: var(--primary); }
   height: 4.6rem;
   box-shadow: 0 .4rem 1rem rgba(99, 102, 241, .35);
 }
+.avatar-xs {
+  width: 18px;
+  height: 18px;
+}
+
+/* ---------- 创作广场 ---------- */
+.like-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+.like-btn:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: #fff1f2;
+}
+.like-btn.liked {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: #fff1f2;
+}
+.like-btn .like-count {
+  font-weight: 600;
+  min-width: 1em;
+  text-align: center;
+}
+.creator-link {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  max-width: 100%;
+  min-width: 0;
+}
+.square-card .record-body {
+  display: flex;
+  flex-direction: column;
+}
+.square-card .record-prompt {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: calc(1.4em * 3);
+}
+.rank-list li:last-child { border-bottom: 0 !important; }
 
 .nav-dot {
   display: inline-block;

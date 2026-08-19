@@ -16,6 +16,7 @@
             <a class="settings-nav-item active" href="#basic" data-pane="basic">基本信息</a>
             <a class="settings-nav-item" href="#register" data-pane="register">注册设置</a>
             <a class="settings-nav-item" href="#checkin" data-pane="checkin">签到设置</a>
+            <a class="settings-nav-item" href="#square" data-pane="square">创作广场</a>
             <a class="settings-nav-item" href="#endpoints" data-pane="endpoints">图片生成接口</a>
             <a class="settings-nav-item" href="#oauth" data-pane="oauth">第三方登录</a>
             <a class="settings-nav-item" href="#storage" data-pane="storage">图片存储</a>
@@ -138,6 +139,33 @@
                         <div class="col-md-4">
                             <label class="form-label fw-semibold">随机最大值</label>
                             <input name="checkin_random_max" type="number" min="1" class="form-control" value="{{.Settings.checkin_random_max}}" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="settings-pane" data-pane="square">
+            <div class="card app-card mb-4 fade-in-up">
+                <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">创作广场</h6></div>
+                <div class="card-body p-4">
+                    <p class="text-muted small mb-3">创作广场是用户发布与浏览 AI 作品的公开空间。关闭后所有用户将无法访问广场（历史数据不受影响，重新开启后恢复展示）。</p>
+                    <div class="row g-4">
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">开启创作广场</label>
+                            <select name="square_enabled" class="form-select">
+                                <option value="true" {{if eq .Settings.square_enabled "true"}}selected{{end}}>开启</option>
+                                <option value="false" {{if ne .Settings.square_enabled "true"}}selected{{end}}>关闭</option>
+                            </select>
+                            <div class="form-text">关闭后用户无法访问创作广场，评价和排行榜功能也受限制。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">允许 NSFW 作品发布到广场</label>
+                            <select name="square_allow_nsfw" class="form-select">
+                                <option value="true" {{if eq .Settings.square_allow_nsfw "true"}}selected{{end}}>允许</option>
+                                <option value="false" {{if ne .Settings.square_allow_nsfw "true"}}selected{{end}}>禁止</option>
+                            </select>
+                            <div class="form-text">禁止时 NSFW 作品在创作时即使勾选"发布到广场"也不会生效；已登录用户可在广场手动开启"显示 NSFW 作品"开关。</div>
                         </div>
                     </div>
                 </div>

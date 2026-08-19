@@ -1,0 +1,228 @@
+{{define "content-square"}}
+{{if .SquareDisabled}}
+<div class="card app-card">
+    <div class="card-body">
+        <div class="empty-state py-5">
+            <div class="empty-state-icon">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+            </div>
+            <p class="mb-1 fs-5 fw-semibold">创作广场已关闭</p>
+            <p class="text-muted mb-3">管理员已关闭创作广场，暂时无法浏览</p>
+            <a href="/" class="btn btn-primary">返回首页</a>
+        </div>
+    </div>
+</div>
+{{else}}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div>
+        <h5 class="mb-0 fw-bold">创作广场</h5>
+        <span class="text-muted small">浏览用户发布到广场的 AI 作品，点赞为创作者加油，还能复制提示词一键再创作</span>
+    </div>
+    <div class="d-flex gap-2 flex-wrap align-items-center">
+        {{if .IsLoggedIn}}
+        <a href="/create" class="btn btn-primary btn-sm">＋ 发布作品</a>
+        {{else}}
+        <a href="/login?next=/create" class="btn btn-primary btn-sm">登录后创作发布</a>
+        {{end}}
+    </div>
+</div>
+<div class="alert alert-info mb-3 d-flex align-items-start gap-2 py-2 px-3" role="alert">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0 mt-1" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+    <span class="small">广场仅展示<strong>成功创作</strong>且创作人<strong>勾选发布</strong>的作品；未发布的作品其他用户不可见。每日点赞排行前 5 名可获得 300/200/100/50/50 积分奖励（每日 0 点结算）。</span>
+</div>
+
+{{if .AllowNSFW}}
+<div class="d-flex justify-content-end mb-3">
+    {{if .IsLoggedIn}}
+    <div class="d-flex align-items-center gap-2">
+        <span class="small text-muted">显示 NSFW 作品</span>
+        <div class="form-check form-switch mb-0">
+            <input type="checkbox" class="form-check-input" id="nsfwToggle" role="switch" data-csrf="{{.CSRF}}" {{if .ShowNSFW}}checked{{end}}>
+            <label class="form-check-label small" for="nsfwToggle">{{if .ShowNSFW}}已开启{{else}}已关闭{{end}}</label>
+        </div>
+    </div>
+    {{else}}
+    <span class="small text-muted"><a href="/login?next={{.BackAfterNSFW}}" class="text-muted">登录后</a>可开启 NSFW 内容</span>
+    {{end}}
+</div>
+{{end}}
+
+<div class="row g-4">
+    <div class="col-lg-8">
+        {{if gt (len .Cards) 0}}
+        <div class="row g-3">
+            {{template "square-cards" .}}
+        </div>
+        {{else}}
+        <div class="card app-card">
+            <div class="card-body">
+                <div class="empty-state py-5">
+                    <div class="empty-state-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                    </div>
+                    <p class="mb-1 fs-5 fw-semibold">广场还没有作品</p>
+                    <p class="text-muted mb-3">创作时勾选「发布到创作广场」，作品成功生成后就会出现在这里</p>
+                    <a href="/create" class="btn btn-primary">去创作发布</a>
+                </div>
+            </div>
+        </div>
+        {{end}}
+        {{template "pagination" .}}
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card app-card mb-4">
+            <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">今日点赞榜</h6></div>
+            <div class="card-body p-3">
+                {{if gt (len .DailyRanking) 0}}
+                <ol class="rank-list list-unstyled mb-0">
+                    {{range .DailyRanking}}
+                    <li class="d-flex align-items-center justify-content-between gap-2 py-2 border-bottom">
+                        <span class="d-flex align-items-center gap-2 min-w-0 flex-nowrap">
+                            <span class="rank-badge {{if eq .Rank 1}}rank-gold{{else if eq .Rank 2}}rank-silver{{else if eq .Rank 3}}rank-bronze{{else}}rank-plain{{end}} flex-shrink-0">{{.Rank}}</span>
+                            <a href="/square/user?u={{urlquery .Name}}" class="text-body text-decoration-none text-truncate" title="查看 {{.Name}} 的作品">{{.Name}}</a>
+                        </span>
+                        <span class="text-muted small text-nowrap">{{.Count}} 赞</span>
+                    </li>
+                    {{end}}
+                </ol>
+                {{else}}
+                <p class="text-muted small text-center py-3 mb-0">今天还没有人获得点赞</p>
+                {{end}}
+                <p class="text-muted small mt-2 mb-0">今日点赞前 5 名分别获得 300 / 200 / 100 / 50 / 50 积分，每日 0 点结算</p>
+            </div>
+        </div>
+        <div class="card app-card">
+            <div class="card-header py-3 px-4"><h6 class="mb-0 fw-bold">7 天点赞榜</h6></div>
+            <div class="card-body p-3">
+                {{if gt (len .WeekRanking) 0}}
+                <ol class="rank-list list-unstyled mb-0">
+                    {{range .WeekRanking}}
+                    <li class="d-flex align-items-center justify-content-between gap-2 py-2 border-bottom">
+                        <span class="d-flex align-items-center gap-2 min-w-0 flex-nowrap">
+                            <span class="rank-badge {{if eq .Rank 1}}rank-gold{{else if eq .Rank 2}}rank-silver{{else if eq .Rank 3}}rank-bronze{{else}}rank-plain{{end}} flex-shrink-0">{{.Rank}}</span>
+                            <a href="/square/user?u={{urlquery .Name}}" class="text-body text-decoration-none text-truncate" title="查看 {{.Name}} 的作品">{{.Name}}</a>
+                        </span>
+                        <span class="text-muted small text-nowrap">{{.Count}} 赞</span>
+                    </li>
+                    {{end}}
+                </ol>
+                {{else}}
+                <p class="text-muted small text-center py-3 mb-0">最近 7 天还没有人获得点赞</p>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+{{end}}
+
+{{define "content-square-user"}}
+{{if .SquareDisabled}}
+<div class="card app-card">
+    <div class="card-body">
+        <div class="empty-state py-5">
+            <div class="empty-state-icon">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+            </div>
+            <p class="mb-1 fs-5 fw-semibold">创作广场已关闭</p>
+            <p class="text-muted mb-3">管理员已关闭创作广场</p>
+            <a href="/" class="btn btn-primary">返回首页</a>
+        </div>
+    </div>
+</div>
+{{else}}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div class="d-flex align-items-center gap-2">
+        <span class="avatar-circle d-inline-flex align-items-center justify-content-center">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-3.33 0-10 1.67-10 5v1h20v-1c0-3.33-6.67-5-10-5z"/></svg>
+        </span>
+        <div>
+            <h5 class="mb-0 fw-bold">{{.SquareUser}} 的作品</h5>
+            <span class="text-muted small">仅展示发布到创作广场的作品（共 {{.Total}} 张）</span>
+        </div>
+    </div>
+    <a href="/square" class="btn btn-outline-secondary btn-sm">← 返回广场</a>
+</div>
+
+{{if .AllowNSFW}}
+<div class="d-flex justify-content-end mb-3">
+    {{if .IsLoggedIn}}
+    <div class="d-flex align-items-center gap-2">
+        <span class="small text-muted">显示 NSFW 作品</span>
+        <div class="form-check form-switch mb-0">
+            <input type="checkbox" class="form-check-input" id="nsfwToggle" role="switch" data-csrf="{{.CSRF}}" {{if .ShowNSFW}}checked{{end}}>
+            <label class="form-check-label small" for="nsfwToggle">{{if .ShowNSFW}}已开启{{else}}已关闭{{end}}</label>
+        </div>
+    </div>
+    {{else}}
+    <span class="small text-muted"><a href="/login?next={{.BackAfterNSFW}}" class="text-muted">登录后</a>可开启 NSFW 内容</span>
+    {{end}}
+</div>
+{{end}}
+
+{{if gt (len .Cards) 0}}
+<div class="row g-3">
+    {{template "square-cards" .}}
+</div>
+{{else}}
+<div class="card app-card">
+    <div class="card-body">
+        <div class="empty-state py-5">
+            <div class="empty-state-icon">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+            </div>
+            <p class="mb-1 fs-5 fw-semibold">还没有发布的作品</p>
+            <p class="text-muted mb-3">ta 创作时勾选「发布到创作广场」的作品才会展示在这里</p>
+            {{if .IsLoggedIn}}<a href="/create" class="btn btn-primary">去创作</a>{{end}}
+        </div>
+    </div>
+</div>
+{{end}}
+{{template "pagination" .}}
+{{end}}
+{{end}}
+
+{{define "square-cards"}}
+{{range .Cards}}
+<div class="col-6 col-md-4 col-xl-3">
+    <div class="record-card square-card" data-record-id="{{.ID}}">
+        {{if .ImageURL}}
+        <img src="{{.ImageURL}}" class="record-cover" data-lightbox loading="lazy" alt="广场作品">
+        {{else}}
+        <div class="record-cover record-cover-empty"><span class="text-muted small">图片已被清理</span></div>
+        {{end}}
+        <div class="record-body">
+            <div class="d-flex align-items-start gap-1 mb-1">
+                <p class="record-prompt mb-0 flex-grow-1" title="{{.Prompt}}">{{if .PromptCut}}{{.PromptCut}}{{else}}{{.Prompt}}{{end}}</p>
+                {{if .Nsfw}}<span class="badge text-bg-warning flex-shrink-0" style="font-size:.65rem;">NSFW</span>{{end}}
+            </div>
+            <div class="d-flex align-items-center gap-2 mb-2">
+                <a href="/square/user?u={{urlquery .Username}}" class="small text-body text-decoration-none creator-link" title="查看 {{.Username}} 的全部广场作品">
+                    <span class="avatar-circle avatar-xs d-inline-flex align-items-center justify-content-center">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-3.33 0-10 1.67-10 5v1h20v-1c0-3.33-6.67-5-10-5z"/></svg>
+                    </span>
+                    <span class="text-truncate">{{.Username}}</span>
+                </a>
+                <span class="text-muted small ms-auto text-nowrap">{{.CreatedAt}}</span>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                {{if $.IsLoggedIn}}
+                <button type="button" class="btn btn-sm like-btn {{if .Liked}}liked{{end}}" data-record-id="{{.ID}}" data-liked="{{if .Liked}}1{{else}}0{{end}}" data-count="{{.LikeCount}}" data-csrf="{{$.CSRF}}" data-owner="{{if eq $.Username .Username}}self{{end}}" aria-pressed="{{if .Liked}}true{{else}}false{{end}}">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="{{if .Liked}}currentColor{{else}}none{{end}}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                    <span class="like-count">{{.LikeCount}}</span>
+                </button>
+                {{else}}
+                <a href="/login?next=/square" class="btn btn-sm btn-outline-secondary" title="登录后点赞">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                    <span class="like-count">{{.LikeCount}}</span>
+                </a>
+                {{end}}
+                <button type="button" class="btn btn-sm btn-outline-secondary copy-btn" data-copy="{{.Prompt}}" data-copy-msg="提示词已复制" title="复制提示词">复制</button>
+                <a href="/create?prompt={{urlquery .Prompt}}" class="btn btn-sm btn-outline-primary ms-auto" title="一键跳转到创作（提示词已自动填入）">去创作</a>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+{{end}}

@@ -46,6 +46,7 @@ func migrate() error {
 			status INTEGER DEFAULT 1,
 			api_key TEXT DEFAULT '',
 			last_read_notice_id INTEGER NOT NULL DEFAULT 0,
+			show_nsfw INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS generation_records (
@@ -65,7 +66,9 @@ func migrate() error {
 			nsfw INTEGER DEFAULT 0,
 			error_msg TEXT DEFAULT '',
 			channel TEXT DEFAULT '',
-			task_key TEXT DEFAULT ''
+			task_key TEXT DEFAULT '',
+			is_public INTEGER DEFAULT 0,
+			published_at DATETIME
 		)`,
 		`CREATE TABLE IF NOT EXISTS redeem_codes (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,6 +155,27 @@ func migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_system_logs_user ON system_logs(username)`,
 		`CREATE INDEX IF NOT EXISTS idx_system_logs_action ON system_logs(action)`,
 		`CREATE INDEX IF NOT EXISTS idx_system_logs_ip ON system_logs(ip)`,
+		`CREATE TABLE IF NOT EXISTS creation_likes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			record_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(record_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_creation_likes_record ON creation_likes(record_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_creation_likes_user ON creation_likes(user_id)`,
+		`CREATE TABLE IF NOT EXISTS like_daily_awards (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			date TEXT NOT NULL,
+			user_id INTEGER NOT NULL,
+			username TEXT NOT NULL DEFAULT '',
+			like_count INTEGER NOT NULL DEFAULT 0,
+			rank INTEGER NOT NULL DEFAULT 0,
+			points INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(date, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_like_daily_awards_date ON like_daily_awards(date)`,
 	}
 	for _, s := range stmts {
 		if _, err := DB.Exec(s); err != nil {
@@ -169,6 +193,11 @@ func migrate() error {
 	}
 	if err := seedAdmin(); err != nil {
 		return err
+	}
+	// 在 ensureColumns 之后创建涉及新列的索引（防止旧表列不存在时索引创建失败）
+	if _, err := DB.Exec("CREATE INDEX IF NOT EXISTS idx_generation_records_public ON generation_records(is_public, status)"); err != nil {
+		// 列尚不存在（ensureColumns 在旧版本上可能因 duplicate column 跳过），
+		// 忽略索引创建失败，后续启动会自动重试
 	}
 	return nil
 }
@@ -200,6 +229,13 @@ func ensureColumns() error {
 		// generation_records.task_key：每条创作记录的随机任务编号（8 位小写字母数字），
 		// 代替递增的 id 对外展示，避免用户看到顺序 ID。
 		"ALTER TABLE generation_records ADD COLUMN task_key TEXT DEFAULT ''",
+		// generation_records.is_public：是否发布到创作广场（1=发布，0=不发布）。
+		// 新创作默认发布（表单默认勾选），历史记录补列为 0 不自动发布。
+		"ALTER TABLE generation_records ADD COLUMN is_public INTEGER DEFAULT 0",
+		// generation_records.published_at：发布到创作广场的时间（首次发布时写入）。
+		"ALTER TABLE generation_records ADD COLUMN published_at DATETIME",
+		// users.show_nsfw：用户是否在创作广场显示 NSFW 作品（仅登录用户可开启，默认关闭）
+		"ALTER TABLE users ADD COLUMN show_nsfw INTEGER NOT NULL DEFAULT 0",
 	}
 	for _, ddl := range adds {
 		if _, err := DB.Exec(ddl); err != nil {
@@ -245,6 +281,9 @@ var defaultConfigs = map[string]string{
 	"cleanup_enabled":                "false",
 	"cleanup_keep_days":              "30",
 	"cleanup_max_mb":                 "2048",
+	// 创作广场设置
+	"square_enabled":                 "true",  // 广场总开关
+	"square_allow_nsfw":              "false", // 是否允许 NSFW 作品发布到广场
 }
 
 func seedConfigs() error {

@@ -23,6 +23,8 @@
         {{else if eq .Content "content-password"}}{{template "content-password" .}}
         {{else if eq .Content "content-profile"}}{{template "content-profile" .}}
         {{else if eq .Content "content-leaderboard"}}{{template "content-leaderboard" .}}
+        {{else if eq .Content "content-square"}}{{template "content-square" .}}
+        {{else if eq .Content "content-square-user"}}{{template "content-square-user" .}}
         {{else if eq .Content "content-rules"}}{{template "content-rules" .}}
         {{else if eq .Content "content-notices"}}{{template "content-notices" .}}
         {{else if eq .Content "content-admin-notices"}}{{template "content-admin-notices" .}}
@@ -40,6 +42,7 @@
             <span class="d-flex gap-3 small">
                 <a class="text-muted text-decoration-none" href="/">首页</a>
                 <a class="text-muted text-decoration-none" href="/create">创意生成</a>
+                <a class="text-muted text-decoration-none" href="/square">创作广场</a>
                 <a class="text-muted text-decoration-none" href="/checkin">每日签到</a>
                 <a class="text-muted text-decoration-none" href="/redeem">积分兑换</a>
                 <a class="text-muted text-decoration-none" href="/leaderboard">排行榜</a>
@@ -85,7 +88,7 @@
     <meta property="og:description" content="{{.SiteName}} —— AI 图片创作平台。">
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="/static/css/style.css?v=78" rel="stylesheet">
+    <link href="/static/css/style.css?v=80" rel="stylesheet">
 </head>
 {{end}}
 
@@ -105,6 +108,7 @@
             {{if .IsLoggedIn}}
             <ul class="navbar-nav me-auto align-items-lg-center">
                 <li class="nav-item"><a class="nav-link" data-nav="/create" href="/create">创意生成</a></li>
+                <li class="nav-item"><a class="nav-link" data-nav="/square" href="/square">创作广场</a></li>
                 <li class="nav-item"><a class="nav-link" data-nav="/records" href="/records">创作记录</a></li>
                 <li class="nav-item"><a class="nav-link" data-nav="/redeem" href="/redeem">积分兑换</a></li>
                 <li class="nav-item"><a class="nav-link" data-nav="/checkin" href="/checkin">每日签到{{if .CheckinAvailable}}<span class="nav-dot" title="今日可签到"></span>{{end}}</a></li>
@@ -169,5 +173,5 @@
 
 {{define "scripts"}}
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/js/app.js?v=112"></script>
+<script src="/static/js/app.js?v=115"></script>
 {{end}}
