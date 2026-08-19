@@ -50,7 +50,7 @@ var (
 	// （ghcr 镜像 / 原生安装包）时通过 -ldflags "-X main.AppVersion=..." 注入
 	// 同一版本号，保证"文件内版本号"与发布版本、镜像内版本号始终一致。
 	// 本地构建请使用 build.sh / build.bat（优先读取 VERSION 文件）。
-	AppVersion = "v1.3.6"
+	AppVersion = "v1.3.7"
 	// uploader 按后台"存储设置"构造的外部长期存储上传器（s3/webdav/post）；
 	// 未配置时为 nil，图片只存服务器本地。
 	// 注意：设置保存/重置（HTTP 请求线程）与生成 worker（后台线程）会并发
