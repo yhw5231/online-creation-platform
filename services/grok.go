@@ -12,6 +12,10 @@ import (
 	"unicode/utf8"
 )
 
+// ErrGatewayTimeout 是 504 网关超时的哨兵错误，用于 main 层判断 504 错误并
+// 应用独立的扣分倍率。
+var ErrGatewayTimeout = fmt.Errorf("上游请求超时（可能是网络问题或生成的内容被网关拦截），请调整提示词或稍后重试")
+
 type GenRequest struct {
 	Model          string `json:"model"`
 	Prompt         string `json:"prompt"`
@@ -77,11 +81,11 @@ func (c *GrokClient) Generate(req GenRequest) (*GenResponse, error) {
 		// 可读的提示，避免把 openresty 超时页等原始内容直接暴露给用户。
 		// 504：网关超时，通常意味着生成内容被网关拦截（审查/拦截超时）。
 		if resp.StatusCode == http.StatusGatewayTimeout {
-			return nil, fmt.Errorf("生成的内容可能被网关拦截（上游请求超时），请调整提示词或稍后重试")
+			return nil, ErrGatewayTimeout
 		}
 		// 502：上游服务暂不可用，或提示词未通过上游审核被拒。
 		if resp.StatusCode == http.StatusBadGateway {
-			return nil, fmt.Errorf("上游服务暂不可用或提示词未通过上游审核，请稍后重试或调整提示词")
+			return nil, fmt.Errorf("生成失败：上游服务暂不可用（账号错误）或提示词未通过上游审核，请稍后重试或调整提示词")
 		}
 		note := strings.TrimSpace(string(data))
 		if utf8.RuneCountInString(note) > 300 {

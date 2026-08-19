@@ -33,7 +33,7 @@ X-API-Key: sk-xxxxxxxx</pre>
                         <tr><td><code>prompt</code></td><td>是</td><td>提示词，最长 4000 字</td></tr>
                         <tr><td><code>model</code></td><td>否</td><td>生成模型，须为该 Key 绑定渠道支持的模型；留空自动用渠道默认模型</td></tr>
                         <tr><td><code>n</code></td><td>否</td><td>生成数量，1–4，默认 1</td></tr>
-                        <tr><td><code>size</code></td><td>否</td><td>OpenAI 尺寸，如 <code>1024x1024</code> / <code>1792x1024</code> / <code>1024x1792</code>，自动换算为宽高比与分辨率档位；默认 1024x1024</td></tr>
+                        <tr><td><code>size</code></td><td>否</td><td>OpenAI 尺寸，如 <code>1024x1024</code> / <code>1792x1024</code> / <code>1024x1792</code>，自动换算为宽高比（支持 1:1、16:9、9:16、4:3、3:4、3:2、2:3）与分辨率档位；默认 1024x1024</td></tr>
                         <tr><td><code>response_format</code></td><td>否</td><td><code>url</code>（默认，返回图片地址）/ <code>b64_json</code>（返回图片 base64 内容）</td></tr>
                     </tbody>
                 </table>

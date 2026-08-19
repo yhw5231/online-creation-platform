@@ -4,7 +4,12 @@
         <h5 class="mb-0 fw-bold">创作记录审查</h5>
         <span class="text-muted small">查看平台上所有用户的创作记录与生成图片</span>
     </div>
-    <div class="d-flex gap-2 flex-wrap">
+    <div class="d-flex gap-2 flex-wrap align-items-center">
+        <!-- 视图切换按钮组 -->
+        <div class="btn-group btn-group-sm" role="group">
+            <a href="{{.PageBase}}view=full&page={{.Page}}" class="btn btn-outline-secondary {{if eq .ViewMode "full"}}active{{end}}">完整</a>
+            <a href="{{.PageBase}}view=images&page={{.Page}}" class="btn btn-outline-secondary {{if eq .ViewMode "images"}}active{{end}}">仅图片</a>
+        </div>
         <span class="badge text-bg-light">共 {{if .Total}}{{.Total}}{{else}}0{{end}} 条记录</span>
         <span class="badge text-bg-light">归档图片 {{if .TotalImages}}{{.TotalImages}}{{else}}0{{end}} 张</span>
         <a href="/admin" class="btn btn-outline-secondary btn-sm">返回概览</a>
@@ -45,6 +50,7 @@
                 {{range $i, $img := .ImagesSub}}<img src="{{$img}}" loading="lazy" data-lightbox alt="作品缩略图" data-cache-key="{{$rec.TaskKey}}-{{add $i 1}}" {{if ge (len $rec.AltURLs) (add $i 2)}}data-alt="{{index $rec.AltURLs (add $i 1)}}"{{end}}>{{end}}
             </div>
             {{end}}
+            {{if ne $.ViewMode "images"}}
             <div class="record-body">
                 <div class="d-flex align-items-start gap-1 mb-2">
                     <p class="record-prompt mb-0 flex-grow-1" title="{{.Prompt}}">{{.Prompt}}</p>
@@ -59,7 +65,7 @@
                     {{else}}<span class="badge text-bg-danger">失败</span>{{end}}
                 </div>
                 <div class="record-error">
-                    {{if eq .Status "failed"}}<div class="small text-danger" title="{{.ErrorMsg}}">{{if .ErrorMsg}}{{trunc .ErrorMsg 50}}{{end}}</div>{{end}}
+                    {{if eq .Status "failed"}}<div class="small text-danger" title="{{.ErrorMsg}}">{{if .ErrorMsg}}{{trunc .ErrorMsg 100}}{{end}}</div>{{end}}
                 </div>
                 <div class="d-flex justify-content-between align-items-center small">
                     <span class="text-muted">用户：<a href="/admin/records?u={{urlquery .Username}}" class="fw-semibold text-decoration-none text-primary">{{if .Username}}{{.Username}}{{else}}已注销{{end}}</a></span>
@@ -82,6 +88,7 @@
                     </div>
                 </div>
             </div>
+            {{end}}
         </div>
     </div>
     {{end}}

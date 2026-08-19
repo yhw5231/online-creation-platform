@@ -85,7 +85,8 @@
                                 <option value="4:3" {{if eq .LastRatio "4:3"}}selected{{end}}>4:3 横屏</option>
                                 <option value="3:4" {{if eq .LastRatio "3:4"}}selected{{end}}>3:4 竖屏</option>
                                 <option value="9:16" {{if eq .LastRatio "9:16"}}selected{{end}}>9:16 竖屏</option>
-                                <option value="21:9" {{if eq .LastRatio "21:9"}}selected{{end}}>21:9 超宽</option>
+                                <option value="3:2" {{if eq .LastRatio "3:2"}}selected{{end}}>3:2 横屏</option>
+                                <option value="2:3" {{if eq .LastRatio "2:3"}}selected{{end}}>2:3 竖屏</option>
                             </select>
                         </div>
                         <div class="col-md-6">
@@ -157,7 +158,7 @@
                             {{else if eq .Status "success"}}<span class="badge text-bg-success">已完成</span>
                             {{else}}<span class="badge text-bg-danger">失败</span>{{end}}
                         </div>
-                        {{if eq .Status "failed"}}<div class="text-danger small mt-1" title="{{.ErrorMsg}}">{{if .ErrorMsg}}{{trunc .ErrorMsg 40}} · {{end}}积分已退回</div>{{end}}
+                        {{if eq .Status "failed"}}<div class="text-danger small mt-1" title="{{.ErrorMsg}}">{{if .ErrorMsg}}{{trunc .ErrorMsg 100}}{{end}}</div>{{end}}
                     </div>
                 </div>
                 {{else}}

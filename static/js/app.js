@@ -654,7 +654,7 @@
           '<span class="small">正在生成中，请稍候…（' + (t.N || 1) + ' 张可能需要一两分钟，页面会自动更新）</span></div>';
         html += '<p class="record-prompt mb-0">' + esc(t.Prompt) + '</p>';
       } else if (t.Status === 'failed') {
-        html += '<div class="alert alert-danger mb-2 py-2 small">' + esc(t.Error || '生成失败') + ' · 本次积分已退回</div>';
+        html += '<div class="alert alert-danger mb-2 py-2 small">' + esc(t.Error || '生成失败') + '</div>';
         html += '<p class="record-prompt mb-0">' + esc(t.Prompt) + '</p>';
       } else {
         var imgs = (t.Images && t.Images.length) ? t.Images : (t.ImageURL ? [t.ImageURL] : []);
@@ -701,8 +701,8 @@
         html += '</div>';
         if (t.Status === 'failed') {
           var e = t.Error || '';
-          html += '<div class="text-danger small mt-1" title="' + esc(e) + '">' + esc(e.substring(0, 40)) +
-            (e.length > 40 ? '…' : '') + (e ? ' · ' : '') + '积分已退回</div>';
+          html += '<div class="text-danger small mt-1" title="' + esc(e) + '">' + esc(e.substring(0, 80)) +
+            (e.length > 80 ? '…' : '') + '</div>';
         }
         html += '</div></div>';
       });

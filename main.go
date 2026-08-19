@@ -1736,6 +1736,19 @@ func generationFailPenalty() float64 {
 	return v
 }
 
+// generationFailPenalty504 504 网关超时错误的独立扣分倍率，与其他错误
+// 独立控制（默认 0.1）。0 = 全额退回，1 = 全额扣减。
+func generationFailPenalty504() float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(models.GetConfigOr("generation_fail_penalty_504", "0.1")), 64)
+	if err != nil || v < 0 {
+		return 0.1
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
 func siteName() string {
 	return models.GetConfigOr("site_name", "在线创作平台")
 }
@@ -1848,6 +1861,19 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	if !containsString(selectedEp.Resolutions, lastResolution) {
 		createPage(w, r, map[string]interface{}{
 			"Error":          fmt.Sprintf("所选渠道不支持 %s 分辨率，请选择渠道支持的分辨率档位", lastResolution),
+			"LastPrompt":     lastPrompt,
+			"LastChannel":    lastChannel,
+			"LastRatio":      lastRatio,
+			"LastResolution": lastResolution,
+			"LastN":          lastN,
+		})
+		return
+	}
+
+	// 宽高比校验：只允许上游 API 支持的比例，避免 400 报错
+	if !validAspectRatio(lastRatio) {
+		createPage(w, r, map[string]interface{}{
+			"Error":          fmt.Sprintf("宽高比 %s 不受支持，可选：%s", lastRatio, strings.Join(supportedAspectRatios(), "、")),
 			"LastPrompt":     lastPrompt,
 			"LastChannel":    lastChannel,
 			"LastRatio":      lastRatio,
@@ -2229,6 +2255,38 @@ func recoverPendingTasks() {
 	}
 }
 
+// appendGenerationLog 把一次生成请求的请求/响应日志追加到 data/logs/generation.log，
+// 便于排查上游问题。kind 取 request / response / error；detail 为对应内容。
+func appendGenerationLog(recordID int64, channel, kind, detail, errMsg string) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("appendGenerationLog panic: %v", p)
+		}
+	}()
+	if err := os.MkdirAll("data/logs", 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile("data/logs/generation.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	entry := map[string]interface{}{
+		"time":      time.Now().In(beijingTZ).Format("2006-01-02 15:04:05"),
+		"record_id": recordID,
+		"channel":   channel,
+		"kind":      kind,
+	}
+	if detail != "" {
+		entry["detail"] = detail
+	}
+	if errMsg != "" {
+		entry["error"] = errMsg
+	}
+	b, _ := json.Marshal(entry)
+	f.Write(append(b, '\n'))
+}
+
 // processGeneration 真正执行一次图片生成：读取任务记录 → 选渠道 →
 // 调 API → 落盘图片 → 更新记录；失败时标记 failed 并退回积分。
 // 更新语句带 status='processing' 条件 + 记录待处理检查，天然幂等，
@@ -2237,7 +2295,7 @@ func processGeneration(recordID int64) {
 	defer func() {
 		if p := recover(); p != nil {
 			log.Printf("generation worker panic on record %d: %v", recordID, p)
-			markTaskFailed(recordID, "服务内部错误，已退回积分，请重试")
+			markTaskFailed(recordID, "服务内部错误，请重试", false)
 		}
 	}()
 	var userID int64
@@ -2267,7 +2325,7 @@ func processGeneration(recordID int64) {
 	if !found {
 		ep, err = selectEndpoint(nsfw == 1)
 		if err != nil {
-			markTaskFailed(recordID, err.Error())
+			markTaskFailed(recordID, err.Error(), false)
 			return
 		}
 	}
@@ -2275,18 +2333,27 @@ func processGeneration(recordID int64) {
 		model = ep.Model
 	}
 	client := services.NewGrokClient(ep.APIURL, ep.APIKey)
-	resp, err := client.Generate(services.GenRequest{
+	genReq := services.GenRequest{
 		Prompt:         prompt,
 		Model:          model,
 		N:              n,
-		AspectRatio:    ratio,
+		AspectRatio:    normalizeAspectRatio(ratio),
 		Resolution:     res,
 		ResponseFormat: format,
-	})
+	}
+	// 记录请求日志
+	reqJSON, _ := json.Marshal(genReq)
+	appendGenerationLog(recordID, channel, "request", string(reqJSON), "")
+	resp, err := client.Generate(genReq)
 	if err != nil {
-		markTaskFailed(recordID, truncateRunes("生成失败："+err.Error(), 250))
+		appendGenerationLog(recordID, channel, "error", "", err.Error())
+		is504 := errors.Is(err, services.ErrGatewayTimeout)
+		markTaskFailed(recordID, truncateRunes(err.Error(), 250), is504)
 		return
 	}
+	// 记录响应日志
+	respJSON, _ := json.Marshal(resp)
+	appendGenerationLog(recordID, channel, "response", string(respJSON), "")
 
 	// 上游返回 200 但没有任何图片内容时视为失败：绝不保留"空成功"
 	hasImage := false
@@ -2297,7 +2364,7 @@ func processGeneration(recordID int64) {
 		}
 	}
 	if !hasImage {
-		markTaskFailed(recordID, "生成服务未返回图片内容，积分已退回，请重试")
+		markTaskFailed(recordID, "生成服务未返回图片内容，请重试", false)
 		return
 	}
 
@@ -2344,7 +2411,7 @@ func processGeneration(recordID int64) {
 	// 全部图片都未成功归档（下载失败/解码失败）时绝不保留"空成功"：
 	// 标记失败并退回积分，避免出现"成功但无图"的任务与裂图缩略图。
 	if !savedAny {
-		markTaskFailed(recordID, "生成成功但图片归档失败，积分已退回，请重试")
+		markTaskFailed(recordID, "生成成功但图片归档失败，请重试", false)
 		return
 	}
 	updRes, _ := models.DB.Exec("UPDATE generation_records SET status='success', image_url=?, channel=? WHERE id=? AND status='processing'",
@@ -2372,20 +2439,27 @@ func rowsAffected(r sql.Result) int64 {
 
 // markTaskFailed 把任务标记为失败并退回本次扣费（幂等：仅处理中任务生效）。
 // 失败并非全额退款：按后台设置"创作失败扣减倍率"（默认 0.1 倍）扣除部分
-// 积分后再退回其余，避免失败请求全部白嫖。
-func markTaskFailed(recordID int64, msg string) {
+// 积分后再退回其余，避免失败请求全部白嫖。is504 为 true 时使用 504 独立倍率。
+func markTaskFailed(recordID int64, msg string, is504 bool) {
 	var userID, cost int64
 	if err := models.DB.QueryRow("SELECT user_id, cost_points FROM generation_records WHERE id=?", recordID).Scan(&userID, &cost); err != nil {
 		log.Printf("markTaskFailed %d: %v", recordID, err)
 		return
 	}
 	// 失败扣减部分 = 本次扣费 × 倍率（向上取整为整数积分），其余退回
-	penalty := int64(math.Round(float64(cost) * generationFailPenalty()))
+	rate := generationFailPenalty()
+	if is504 {
+		rate = generationFailPenalty504()
+	}
+	penalty := int64(math.Round(float64(cost) * rate))
 	if penalty > cost {
 		penalty = cost
 	}
 	refund := cost - penalty
-	if rowsAffected(mustExec("UPDATE generation_records SET status='failed', error_msg=? WHERE id=? AND status='processing'", truncateRunes(msg, 300), recordID)) == 0 {
+	// 构建最终错误消息：原 msg + 退回分数
+	finalMsg := truncateRunes(msg, 300)
+	finalMsg += " · 本次积分已退回" + strconv.FormatInt(refund, 10) + "分"
+	if rowsAffected(mustExec("UPDATE generation_records SET status='failed', error_msg=? WHERE id=? AND status='processing'", finalMsg, recordID)) == 0 {
 		return
 	}
 	if refund > 0 {
@@ -2743,6 +2817,10 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	models.DB.QueryRow(failedSQL, failedArgs...).Scan(&failedCost)
 	totalCost += int64(math.Round(float64(failedCost) * generationFailPenalty()))
+	viewMode := r.URL.Query().Get("view")
+	if viewMode != "images" {
+		viewMode = "full"
+	}
 	pageBase := "/records?"
 	if q != "" {
 		pageBase += "q=" + url.QueryEscape(q) + "&"
@@ -2760,6 +2838,7 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 		"PrevPage":   page - 1,
 		"NextPage":   page + 1,
 		"PageBase":   pageBase,
+		"ViewMode":   viewMode,
 		"Content":    "content-records",
 	})
 }
@@ -2957,6 +3036,10 @@ func adminRecordsHandler(w http.ResponseWriter, r *http.Request) {
 		rec["AltURLs"] = altMap[rec["ID"].(int64)]
 	}
 	// 分页链接携带当前筛选条件（& 结尾，方便直接拼 page=）
+	viewMode := r.URL.Query().Get("view")
+	if viewMode != "images" {
+		viewMode = "full"
+	}
 	pageBase := "/admin/records?"
 	var parts []string
 	for k, v := range map[string]string{"q": q, "u": u, "s": s} {
@@ -2983,6 +3066,7 @@ func adminRecordsHandler(w http.ResponseWriter, r *http.Request) {
 		"PrevPage":     page - 1,
 		"NextPage":     page + 1,
 		"PageBase":     pageBase,
+		"ViewMode":     viewMode,
 		"Content":      "content-admin-records",
 	})
 }
@@ -4075,6 +4159,13 @@ func adminUpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		// 创作失败扣减倍率：0~1 的浮点数，非法或越界一律保留旧值
 		if key == "generation_fail_penalty" {
+			f, err := strconv.ParseFloat(value, 64)
+			if err == nil && f >= 0 && f <= 1 {
+				models.SetConfig(key, strconv.FormatFloat(f, 'f', -1, 64))
+			}
+			continue
+		}
+		if key == "generation_fail_penalty_504" {
 			f, err := strconv.ParseFloat(value, 64)
 			if err == nil && f >= 0 && f <= 1 {
 				models.SetConfig(key, strconv.FormatFloat(f, 'f', -1, 64))
@@ -6604,10 +6695,33 @@ func apiOpenAIError(w http.ResponseWriter, status int, typ, message string) {
 	})
 }
 
+// supportedAspectRatios 返回上游 API 支持的宽高比列表。
+func supportedAspectRatios() []string {
+	return []string{"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
+}
+
+// validAspectRatio 检查宽高比是否为上游 API 支持的值。
+func validAspectRatio(ratio string) bool {
+	for _, r := range supportedAspectRatios() {
+		if r == ratio {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeAspectRatio 将不支持的宽高比映射为默认值 1:1，
+// 用于兜底数据库中已存在的非法比例记录。
+func normalizeAspectRatio(ratio string) string {
+	if validAspectRatio(ratio) {
+		return ratio
+	}
+	return "1:1"
+}
+
 // openAISizeToParams 把 OpenAI 风格的 size（如 1024x1024）换算成
 // 本站的宽高比与分辨率档位。空值或无法解析时回退 1:1 + 1k。
-func openAISizeToParams(size string) (ratio, res string) {
-	size = strings.TrimSpace(strings.ToLower(size))
+func openAISizeToParams(size string) (ratio, res string) {	size = strings.TrimSpace(strings.ToLower(size))
 	var w, h int
 	if _, err := fmt.Sscanf(size, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
 		return "1:1", "1k"
@@ -6632,10 +6746,11 @@ func openAISizeToParams(size string) (ratio, res string) {
 	ars := []ar{
 		{"1:1", 1.0},
 		{"16:9", 16.0 / 9.0},
+		{"9:16", 9.0 / 16.0},
 		{"4:3", 4.0 / 3.0},
 		{"3:4", 3.0 / 4.0},
-		{"9:16", 9.0 / 16.0},
-		{"21:9", 21.0 / 9.0},
+		{"3:2", 3.0 / 2.0},
+		{"2:3", 2.0 / 3.0},
 	}
 	f := float64(w) / float64(h)
 	best := ars[0]

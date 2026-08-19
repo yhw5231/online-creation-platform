@@ -2007,6 +2007,77 @@ func TestRecordsTotalCostIncludesFailPenalty(t *testing.T) {
 	}
 }
 
+// TestRecordsViewModeImagesOnly 验证创作记录页"仅图片"视图：
+// view=images 时隐藏记录主体信息（record-body/提示词/操作区），
+// 只保留封面与配图；默认或 view=full 时完整显示。
+func TestRecordsViewModeImagesOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer models.DB.Close()
+	tpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"comma":   commaFormat,
+		"pages":   pagesAround,
+		"trunc":   truncateRunes,
+		"add":     func(a, b int) int { return a + b },
+		"hasRes":  func(list []string, v string) bool { return containsString(list, v) },
+		"maskKey": maskKey,
+	}).ParseGlob("templates/*.html"))
+	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, points INTEGER DEFAULT 0, role TEXT DEFAULT 'user', status INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, model TEXT,
+		n INTEGER DEFAULT 1, aspect_ratio TEXT, resolution TEXT, response_format TEXT,
+		cost_points INTEGER DEFAULT 0, status TEXT, image_url TEXT, error_msg TEXT,
+		channel TEXT, nsfw INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`)
+	models.DB.Exec(`INSERT INTO generation_records(user_id, prompt, cost_points, status, image_url) VALUES
+		(1,'仅图片验证',10,'success','/images/v1.png')`)
+
+	render := func(view string) string {
+		req := httptest.NewRequest(http.MethodGet, "/records?view="+view, nil)
+		s, _ := store.Get(req, "session")
+		s.Values["userID"] = int64(1)
+		s.Values["username"] = "u"
+		s.Values["role"] = "user"
+		w0 := httptest.NewRecorder()
+		s.Save(req, w0)
+		w := httptest.NewRecorder()
+		recordsHandler(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("view=%s status=%d", view, w.Code)
+		}
+		b, _ := io.ReadAll(w.Body)
+		return string(b)
+	}
+
+	full := render("full")
+	if !strings.Contains(full, `class="record-body"`) {
+		t.Error("full view should include record-body")
+	}
+	if !strings.Contains(full, "仅图片验证") {
+		t.Error("full view should include prompt text")
+	}
+	if !strings.Contains(full, `view=images`) {
+		t.Error("full view should offer images switch link")
+	}
+
+	images := render("images")
+	if strings.Contains(images, `class="record-body"`) {
+		t.Error("images-only view must not include record-body")
+	}
+	if strings.Contains(images, "仅图片验证") {
+		t.Error("images-only view must not show prompt text")
+	}
+	if !strings.Contains(images, "/images/v1.png") {
+		t.Error("images-only view must keep cover image")
+	}
+	if !strings.Contains(images, `view=full`) {
+		t.Error("images-only view should offer full switch link")
+	}
+}
+
 // TestRefundSystemLogAndUsersOAuth 验证：
 // 1) markTaskFailed 按"创作失败扣减倍率"（默认 0.1）扣除部分积分后把其余
 //    退回（30 积分 × 0.1 = 扣 3、退 27），同时写入系统日志（action=refund）；
@@ -2038,7 +2109,7 @@ func TestRefundSystemLogAndUsersOAuth(t *testing.T) {
 	rid, _ := res2.LastInsertId()
 
 	// 1) 部分退回积分（扣 3 退 27）+ 系统日志
-	markTaskFailed(rid, "模拟生成失败")
+	markTaskFailed(rid, "模拟生成失败", false)
 	var points int64
 	models.DB.QueryRow("SELECT points FROM users WHERE id=?", uid).Scan(&points)
 	if points != 127 {
@@ -2098,7 +2169,7 @@ func TestMarkTaskFailedPenaltyFull(t *testing.T) {
 		uid, "测试", 40, "processing", "penalty01")
 	rid, _ := res2.LastInsertId()
 
-	markTaskFailed(rid, "模拟生成失败")
+	markTaskFailed(rid, "模拟生成失败", false)
 	var points int64
 	models.DB.QueryRow("SELECT points FROM users WHERE id=?", uid).Scan(&points)
 	if points != 100 {

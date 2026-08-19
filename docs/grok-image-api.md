@@ -1,4 +1,4 @@
-﻿# Grok 图片生成 API 开发文档
+# Grok 图片生成 API 开发文档
 
 ## 基本信息
 - **Base URL**: https://grok.7890456.xyz/v1
@@ -13,7 +13,7 @@
 | prompt | string | 是 | 图片生成的提示词 |
 | 
  | integer | 否 | 返回图片数量，网关自动匹配上游批次 |
-| spect_ratio | string | 否 | 宽高比，如 1:1、2:3、16:9 |
+| aspect_ratio | string | 否 | 宽高比，支持 1:1、16:9、9:16、4:3、3:4、3:2、2:3 |
 | esolution | string | 否 | 分辨率，图片支持 1k / 2k |
 | esponse_format | string | 否 | url 或 64_json，默认 url |
 | stream | boolean | 否 | 是否启用 SSE 流式输出，默认 alse |
