@@ -3463,6 +3463,41 @@ func TestSquareLike(t *testing.T) {
 	}
 }
 
+// TestSquareCardsLikeCount 验证广场卡片点赞数正确渲染：作品已有点赞记录时，
+// 重新渲染广场页（等价于点赞后刷新页面），卡片应显示最新点赞数与已点赞状态，
+// 而不会因查询失败全部显示 0（回归：squareCards 曾把带别名的 where 拼进
+// "SELECT id FROM generation_records" 子查询导致计数查询报错被吞）。
+func TestSquareCardsLikeCount(t *testing.T) {
+	cleanup := setupSquareTestEnv(t)
+	defer cleanup()
+	squareBaseTables()
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'liker','x',100,'user',1),(2,'author','x',100,'user',1)")
+	models.DB.Exec("INSERT INTO generation_records(id, user_id, prompt, cost_points, status, is_public, nsfw) VALUES(1,2,'作品A',10,'success',1,0)")
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/img/a.png')")
+	// liker 已点赞作品 1
+	models.DB.Exec("INSERT INTO creation_likes(record_id, user_id) VALUES(1,1)")
+
+	// 已点赞用户刷新页面：卡片应显示 1 赞、data-liked=1、liked 高亮
+	req := authenticatedRequest(t, http.MethodGet, "/square", 1, "liker", "")
+	req.Header.Del("Content-Type")
+	w := httptest.NewRecorder()
+	squareHandler(w, req)
+	body := w.Body.String()
+	if !strings.Contains(body, `data-record-id="1" data-liked="1" data-count="1"`) {
+		t.Errorf("liked user refresh: card should render data-liked=1 data-count=1:\n%s", body)
+	}
+	if !strings.Contains(body, `like-btn liked`) {
+		t.Error("liked user refresh: like button should have liked highlight class")
+	}
+
+	// 未登录刷新页面：卡片仍应显示 1 赞（计数不能被清零）
+	w2 := httptest.NewRecorder()
+	squareHandler(w2, httptest.NewRequest(http.MethodGet, "/square", nil))
+	if !strings.Contains(w2.Body.String(), `class="like-count">1</span>`) {
+		t.Errorf("anonymous refresh: card should still show 1 like:\n%s", w2.Body.String())
+	}
+}
+
 // TestRecordDeleteFailed 验证一键删除失败记录接口：只删除当前用户的失败记录，
 // 成功记录不受影响，失败记录的相关点赞数据一并清理。
 func TestRecordDeleteFailed(t *testing.T) {

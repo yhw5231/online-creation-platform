@@ -3202,10 +3202,17 @@ func squareCards(r *http.Request, where, order string, args []interface{}, page,
 	if len(ids) == 0 {
 		return list, total
 	}
-	// 聚合本页作品的点赞数
+	// 聚合本页作品的点赞数：直接用本页已解析出的作品 ID 查询。
+	// 注意不能把带 gr./u. 别名的 where 拼进 "SELECT id FROM generation_records"
+	// 子查询——子查询里没有这些别名会执行失败（错误被忽略），
+	// 导致卡片点赞数全部显示 0（刷新后点赞"丢失"）。
 	likeCount := map[int64]int64{}
-	rowsL, err := models.DB.Query("SELECT record_id, COUNT(*) FROM creation_likes WHERE record_id IN (SELECT id FROM generation_records WHERE "+where+" ORDER BY "+order+" LIMIT ? OFFSET ?) GROUP BY record_id",
-		append(args, perPage, (page-1)*perPage)...)
+	likeIDs := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	likeArgs := make([]interface{}, len(ids))
+	for i, rid := range ids {
+		likeArgs[i] = rid
+	}
+	rowsL, err := models.DB.Query("SELECT record_id, COUNT(*) FROM creation_likes WHERE record_id IN ("+likeIDs+") GROUP BY record_id", likeArgs...)
 	if err == nil {
 		for rowsL.Next() {
 			var rid, cnt int64
@@ -3218,8 +3225,8 @@ func squareCards(r *http.Request, where, order string, args []interface{}, page,
 	// 当前用户是否已点赞本页作品
 	likedSet := map[int64]bool{}
 	if uid > 0 {
-		rowsM, err := models.DB.Query("SELECT record_id FROM creation_likes WHERE user_id=? AND record_id IN (SELECT id FROM generation_records WHERE "+where+" ORDER BY "+order+" LIMIT ? OFFSET ?)",
-			append(append([]interface{}{uid}, args...), perPage, (page-1)*perPage)...)
+		rowsM, err := models.DB.Query("SELECT record_id FROM creation_likes WHERE user_id=? AND record_id IN ("+likeIDs+")",
+			append([]interface{}{uid}, likeArgs...)...)
 		if err == nil {
 			for rowsM.Next() {
 				var rid int64

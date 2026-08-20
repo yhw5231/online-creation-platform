@@ -516,7 +516,10 @@
   function bindLightbox(img) {
     if (!img || img.__lbBound) return;
     img.__lbBound = true;
-    img.addEventListener('click', function () {
+    img.addEventListener('click', function (e) {
+      // 缩略图可能是 <a href> 包裹（如排行榜作品），必须阻止默认跳转，
+      // 否则弹窗的同时页面会直接跳转到原图地址
+      if (e && e.preventDefault) e.preventDefault();
       var src = img.getAttribute('src');
       if (lightboxModal) {
         modalImg.src = src;
@@ -1081,7 +1084,7 @@
   isPublicLabel.appendChild(hint);
   function updateHint() {
     var opt = channelSelect.options[channelSelect.selectedIndex];
-    var isNsfw = opt && opt.getAttribute('data-nsfw') === 'true';
+    var isNsfw = opt && opt.getAttribute('data-nsfw') === '1';
     var createForm = channelSelect.closest('form[data-square-nsfw]');
     var squareNsfwAllowed = createForm && createForm.getAttribute('data-square-nsfw') === '1';
     if (isNsfw && !squareNsfwAllowed) {
@@ -1089,7 +1092,12 @@
       if (isPublicCheck) { isPublicCheck.checked = false; isPublicCheck.disabled = true; }
     } else {
       hint.style.display = 'none';
-      if (isPublicCheck) { isPublicCheck.disabled = false; }
+      if (isPublicCheck) {
+        isPublicCheck.disabled = false;
+        // NSFW 渠道且管理员已允许发布：恢复默认勾选"发布到广场"；
+        // 普通渠道保持用户自己的选择
+        if (isNsfw) isPublicCheck.checked = true;
+      }
     }
   }
   updateHint();
