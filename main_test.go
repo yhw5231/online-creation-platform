@@ -3240,7 +3240,7 @@ func TestSquareHandler(t *testing.T) {
 		(4,1,'nsfw作品',10,'success',1,1),
 		(5,1,'失败作品',10,'failed',1,0)`)
 	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0, path TEXT DEFAULT '', storage_type TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
-	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/s1.png'),(3,0,'/images/s3.png')")
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/s1.png'),(3,0,'/images/s3.png'),(4,0,'/images/s4.png')")
 	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
 
 	w := httptest.NewRecorder()
@@ -3255,12 +3255,12 @@ func TestSquareHandler(t *testing.T) {
 			t.Errorf("square page should contain %q", s)
 		}
 	}
-	// 未发布、NSFW、失败记录不应出现在广场
+	// 未发布、失败记录不应出现在广场；已发布的 NSFW 作品正常展示
 	if strings.Contains(body, "未发布作品") {
 		t.Error("square page should not contain unpublished record")
 	}
-	if strings.Contains(body, "nsfw作品") {
-		t.Error("square page should not contain NSFW record")
+	if !strings.Contains(body, "nsfw作品") {
+		t.Error("square page should contain published NSFW record")
 	}
 	if strings.Contains(body, "失败作品") {
 		t.Error("square page should not contain failed record")
@@ -3582,53 +3582,99 @@ func TestRecordPublish(t *testing.T) {
 	}
 }
 
-// TestLikeRanking 验证点赞排行榜：按北京时间的当日/近 7 天排序，
-// 只统计正常状态用户，正确返回排名与数量。
+// TestLikeRanking 验证点赞排行榜按作品各自的点赞数统计（点赞只按作品计算）：
+// 每个榜单项代表一个作品（含封面图、完整/截断提示词、作者、该作品自身的点赞数），
+// 同一作者的不同作品分别上榜；取消发布、无图的记录不参与排行，
+// 执行点赞的用户不会作为作者出现在榜单上；NSFW 作品发布后正常入榜。
 func TestLikeRanking(t *testing.T) {
 	dir := t.TempDir()
 	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
 		t.Fatal(err)
 	}
 	defer models.DB.Close()
+	// InitDB 会在空库自动创建 admin（占用 id=1），先清空再插入固定 id 的测试用户
+	models.DB.Exec("DELETE FROM users")
 	models.DB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, points INTEGER DEFAULT 0, role TEXT DEFAULT 'user', status INTEGER DEFAULT 1)`)
-	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1),(2,'u2','x',100,'user',1)")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'author1','x',100,'user',1),(2,'author2','x',100,'user',1),(3,'liker','x',100,'user',1)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, status TEXT, nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0)`)
+	models.DB.Exec("INSERT INTO generation_records(id, user_id, prompt, status, nsfw, is_public) VALUES" +
+		"(1,1,'p1','success',0,1),(2,1,'p2','success',0,1),(3,2,'p3','success',0,1)," +
+		"(4,2,'p4','success',1,1),(5,1,'p5','success',0,0)")
+	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0, path TEXT DEFAULT '', storage_path TEXT DEFAULT '')`)
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/img/1.png'),(2,0,'/img/2.png'),(3,0,'/img/3.png'),(4,0,'/img/4.png')")
 	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
-	models.DB.Exec("INSERT INTO creation_likes(record_id, user_id) VALUES(1,1),(2,1),(3,1),(4,2)")
+	// 点赞：liker 赞了作品 1、2、4；author1 赞了作品 3（liker 是执行点赞者，不应上榜）
+	models.DB.Exec("INSERT INTO creation_likes(record_id, user_id) VALUES(1,3),(2,3),(3,1),(4,3)")
 
-	daily := likeRanking("daily", 10)
-	if len(daily) == 0 {
-		t.Log("daily ranking empty (no likes today), not a test issue")
-	}
-	week := likeRanking("week", 10)
-	if len(week) == 0 {
-		t.Log("week ranking empty (no likes this week), not a test issue")
+	for _, kind := range []string{"daily", "week"} {
+		ranking := likeRanking(kind, 10)
+		// 上榜作品为 1/2/3/4（各 1 赞，按点赞先后稳定排序 1,2,3,4）；
+		// 未发布作品 5 不上榜；NSFW 作品 4 发布后正常入榜。
+		if len(ranking) != 4 {
+			t.Fatalf("%s ranking length=%d want 4: %#v", kind, len(ranking), ranking)
+		}
+		if ranking[0]["ID"] != int64(1) || ranking[1]["ID"] != int64(2) || ranking[2]["ID"] != int64(3) || ranking[3]["ID"] != int64(4) {
+			t.Errorf("%s order=%#v want 1,2,3,4", kind, ranking)
+		}
+		for _, item := range ranking {
+			if item["Count"] != int64(1) {
+				t.Errorf("%s item=%#v: each work should count its own likes only", kind, item)
+			}
+			if item["Username"] == "liker" {
+				t.Errorf("%s ranking must not rank users by likes they gave: %#v", kind, ranking)
+			}
+			if item["Prompt"] != item["PromptCut"] {
+				t.Errorf("%s item=%#v: PromptCut should be truncated display of Prompt", kind, item)
+			}
+		}
+		if ranking[0]["Username"] != "author1" || ranking[2]["Username"] != "author2" || ranking[3]["Username"] != "author2" {
+			t.Errorf("%s authors wrong: %#v", kind, ranking)
+		}
+		if ranking[0]["ImageURL"] != "/img/1.png" || ranking[2]["ImageURL"] != "/img/3.png" || ranking[3]["ImageURL"] != "/img/4.png" {
+			t.Errorf("%s image urls wrong: %#v", kind, ranking)
+		}
 	}
 }
 
-// TestSettleLikeRanking 验证每日点赞排行结算：幂等性（重复结算不重复发放），
-// 无点赞时不发放积分。
+// TestSettleLikeRanking 验证每日点赞奖励发给获赞作品的作者，
+// 而不是执行点赞操作的用户，并验证重复结算不会重复发放。
 func TestSettleLikeRanking(t *testing.T) {
 	dir := t.TempDir()
 	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
 		t.Fatal(err)
 	}
 	defer models.DB.Close()
+	// InitDB 会在空库自动创建 admin（占用 id=1），先清空再插入固定 id 的测试用户
+	models.DB.Exec("DELETE FROM users")
 	models.DB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, points INTEGER DEFAULT 0, role TEXT DEFAULT 'user', status INTEGER DEFAULT 1)`)
-	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',0,'user',1),(2,'u2','x',0,'user',1)")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'author','x',0,'user',1),(2,'liker','x',0,'user',1)")
 	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
 	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_records (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, prompt TEXT, status TEXT, nsfw INTEGER DEFAULT 0, is_public INTEGER DEFAULT 0)`)
 	models.DB.Exec(`CREATE TABLE IF NOT EXISTS generation_images (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER, idx INTEGER DEFAULT 0, path TEXT DEFAULT '')`)
-	models.DB.Exec("INSERT INTO generation_records(id, user_id, prompt, status, is_public) VALUES(1,1,'p1','success',1),(2,1,'p2','success',1),(3,1,'p3','success',1),(4,2,'p4','success',1)")
-	// 结算今天的日期（可能没有数据，但两次调用都应幂等不报错）
+	models.DB.Exec("INSERT INTO generation_records(id, user_id, prompt, status, is_public) VALUES(1,1,'p1','success',1)")
+	models.DB.Exec("INSERT INTO creation_likes(record_id, user_id) VALUES(1,2)")
+
 	today := time.Now().In(beijingTZ).Format("2006-01-02")
 	settleLikeRanking(today)
 	settleLikeRanking(today)
-	// 无点赞，无人获得奖励
-	var p1, p2 int64
-	models.DB.QueryRow("SELECT points FROM users WHERE id=1").Scan(&p1)
-	models.DB.QueryRow("SELECT points FROM users WHERE id=2").Scan(&p2)
-	if p1 != 0 || p2 != 0 {
-		t.Errorf("no likes yet, points should be 0: u1=%d u2=%d", p1, p2)
+
+	var authorPoints, likerPoints int64
+	models.DB.QueryRow("SELECT points FROM users WHERE id=1").Scan(&authorPoints)
+	models.DB.QueryRow("SELECT points FROM users WHERE id=2").Scan(&likerPoints)
+	if authorPoints != 300 {
+		t.Errorf("author points=%d want 300", authorPoints)
+	}
+	if likerPoints != 0 {
+		t.Errorf("liker points=%d want 0", likerPoints)
+	}
+
+	var awardUserID, likeCount, rank, points int64
+	var awardUsername string
+	if err := models.DB.QueryRow("SELECT user_id, username, like_count, rank, points FROM like_daily_awards WHERE date=?", today).Scan(&awardUserID, &awardUsername, &likeCount, &rank, &points); err != nil {
+		t.Fatalf("read daily award: %v", err)
+	}
+	if awardUserID != 1 || awardUsername != "author" || likeCount != 1 || rank != 1 || points != 300 {
+		t.Errorf("award=(user_id=%d username=%s likes=%d rank=%d points=%d), want author/1/1/300", awardUserID, awardUsername, likeCount, rank, points)
 	}
 }
 
@@ -3714,104 +3760,76 @@ func TestSquareDisabled(t *testing.T) {
 	}
 }
 
-// TestSquareNSFWVisibility 验证 NSFW 可见性规则：
-// 管理员允许 NSFW 时，未登录/未开启的用户看不到 NSFW 作品，
-// 已登录且开启 show_nsfw 的用户可以看到。
+// TestSquareNSFWVisibility 验证 NSFW 可见性规则：NSFW 作品不跟随浏览者偏好，
+// 创作时勾选发布、成功生成后即对所有人（含未登录）直接展示；管理员开关仅约束
+// 创作时能否发布 NSFW（见 TestCreatePageExposesSquareNSFWSetting），不影响已发布作品展示。
 func TestSquareNSFWVisibility(t *testing.T) {
 	cleanup := setupSquareTestEnv(t)
 	defer cleanup()
 	squareBaseTables()
-	models.SetConfig("square_allow_nsfw", "true")
+	models.SetConfig("square_allow_nsfw", "false")
 	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status, show_nsfw) VALUES(1,'u1','x',100,'user',1,0),(2,'u2','x',100,'user',1,1)")
 	models.DB.Exec(`INSERT INTO generation_records(id, user_id, prompt, cost_points, status, is_public, nsfw) VALUES
 		(1,1,'普通作品',10,'success',1,0),
-		(2,1,'NSFW作品',10,'success',1,1)`)
-	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/a.png'),(2,0,'/images/b.png')")
+		(2,1,'NSFW作品',10,'success',1,1),
+		(3,1,'NSFW未发布',10,'success',0,1)`)
+	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/a.png'),(2,0,'/images/b.png'),(3,0,'/images/c.png')")
 
-	// 未登录：看不到 NSFW
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/square", nil)
-	squareHandler(w, req)
-	body := w.Body.String()
-	if !strings.Contains(body, "普通作品") {
-		t.Error("logged-out user should see normal work")
-	}
-	if strings.Contains(body, "NSFW作品") {
-		t.Error("logged-out user should NOT see NSFW work")
-	}
-
-	// 已登录但未开启 show_nsfw (u1)：看不到 NSFW
-	req1 := authenticatedRequest(t, http.MethodGet, "/square", 1, "u1", "")
-	req1.Header.Del("Content-Type")
-	w1 := httptest.NewRecorder()
-	squareHandler(w1, req1)
-	body1 := w1.Body.String()
-	if strings.Contains(body1, "NSFW作品") {
-		t.Error("logged-in user with show_nsfw=0 should NOT see NSFW work")
-	}
-
-	// 已登录且开启 show_nsfw (u2)：可以看到 NSFW
-	req2 := authenticatedRequest(t, http.MethodGet, "/square", 2, "u2", "")
-	req2.Header.Del("Content-Type")
-	w2 := httptest.NewRecorder()
-	squareHandler(w2, req2)
-	if !strings.Contains(w2.Body.String(), "NSFW作品") {
-		t.Error("logged-in user with show_nsfw=1 SHOULD see NSFW work")
-	}
-
-	// 管理员关闭 NSFW 后：即使开启 show_nsfw 也看不到
-	models.SetConfig("square_allow_nsfw", "false")
-	req3 := authenticatedRequest(t, http.MethodGet, "/square", 2, "u2", "")
-	req3.Header.Del("Content-Type")
-	w3 := httptest.NewRecorder()
-	squareHandler(w3, req3)
-	if strings.Contains(w3.Body.String(), "NSFW作品") {
-		t.Error("when admin disallows NSFW, no one should see NSFW work")
+	for _, tc := range []struct {
+		name string
+		uid  int64
+	}{
+		{name: "logged-out", uid: 0},
+		{name: "logged-in show_nsfw=0", uid: 1},
+		{name: "logged-in show_nsfw=1", uid: 2},
+	} {
+		var req *http.Request
+		if tc.uid > 0 {
+			req = authenticatedRequest(t, http.MethodGet, "/square", tc.uid, "u1", "")
+			req.Header.Del("Content-Type")
+		} else {
+			req = httptest.NewRequest(http.MethodGet, "/square", nil)
+		}
+		w := httptest.NewRecorder()
+		squareHandler(w, req)
+		body := w.Body.String()
+		if !strings.Contains(body, "NSFW作品") {
+			t.Errorf("%s should see published NSFW work", tc.name)
+		}
+		if strings.Contains(body, "NSFW未发布") {
+			t.Errorf("%s should NOT see unpublished NSFW work", tc.name)
+		}
+		if !strings.Contains(body, "普通作品") {
+			t.Errorf("%s should see normal work", tc.name)
+		}
 	}
 }
 
-// TestSquareNSFWHandler 验证 NSFW 开关切换接口：登录用户可设置，
-// 管理员关闭 NSFW 时设置强制为 false。
-func TestSquareNSFWHandler(t *testing.T) {
+// TestCreatePageExposesSquareNSFWSetting 验证创作页会把管理员的 NSFW 广场开关传给前端，
+// square_allow_nsfw 仅约束创作时能否勾选发布 NSFW（不再用于浏览过滤）。
+func TestCreatePageExposesSquareNSFWSetting(t *testing.T) {
 	cleanup := setupSquareTestEnv(t)
 	defer cleanup()
 	squareBaseTables()
-	models.SetConfig("square_allow_nsfw", "true")
-	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status, show_nsfw) VALUES(1,'u1','x',100,'user',1,0)")
+	models.DB.Exec("INSERT INTO users(id, username, password_hash, points, role, status) VALUES(1,'u1','x',100,'user',1)")
 
-	req := authenticatedRequest(t, http.MethodPost, "/square/nsfw", 1, "u1", "on=1&_csrf=test-csrf")
-	w := httptest.NewRecorder()
-	squareNSFWHandler(w, req)
-	var resp struct {
-		Ok      bool `json:"ok"`
-		ShowNSW bool `json:"show_nsfw"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json: %v", err)
-	}
-	if !resp.Ok || !resp.ShowNSW {
-		t.Errorf("nsfw toggle on: ok=%v show_nsfw=%v want true", resp.Ok, resp.ShowNSW)
-	}
-	var v int
-	models.DB.QueryRow("SELECT show_nsfw FROM users WHERE id=1").Scan(&v)
-	if v != 1 {
-		t.Errorf("after toggle on, show_nsfw=%d want 1", v)
-	}
-
-	// 管理员关闭 NSFW 后开关强制关闭
-	models.SetConfig("square_allow_nsfw", "false")
-	req2 := authenticatedRequest(t, http.MethodPost, "/square/nsfw", 1, "u1", "on=1&_csrf=test-csrf")
-	w2 := httptest.NewRecorder()
-	squareNSFWHandler(w2, req2)
-	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json: %v", err)
-	}
-	if resp.Ok && resp.ShowNSW {
-		t.Error("nsfw toggle should force off when admin disables NSFW")
-	}
-	models.DB.QueryRow("SELECT show_nsfw FROM users WHERE id=1").Scan(&v)
-	if v != 0 {
-		t.Errorf("after admin disables, show_nsfw=%d want 0", v)
+	for _, tc := range []struct {
+		setting string
+		want    string
+	}{
+		{setting: "true", want: `data-square-nsfw="1"`},
+		{setting: "false", want: `data-square-nsfw="0"`},
+	} {
+		models.SetConfig("square_allow_nsfw", tc.setting)
+		req := authenticatedRequest(t, http.MethodGet, "/create", 1, "u1", "")
+		w := httptest.NewRecorder()
+		createHandler(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("square_allow_nsfw=%s: status=%d want 200", tc.setting, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), tc.want) {
+			t.Errorf("square_allow_nsfw=%s: create page missing %s", tc.setting, tc.want)
+		}
 	}
 }
 

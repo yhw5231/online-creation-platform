@@ -182,6 +182,26 @@ a.link-primary { color: var(--primary); }
   min-height: calc(1.4em * 3);
 }
 .rank-list li:last-child { border-bottom: 0 !important; }
+.min-w-0 { min-width: 0; }
+
+/* ---------- 点赞榜作品缩略图 ---------- */
+.rank-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--border);
+}
+.rank-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform .2s;
+}
+.rank-thumb:hover img { transform: scale(1.05); }
+.rank-list .copy-btn { cursor: pointer; }
+.rank-list .copy-btn:hover { color: var(--primary); }
 
 .nav-dot {
   display: inline-block;

@@ -28,24 +28,8 @@
 </div>
 <div class="alert alert-info mb-3 d-flex align-items-start gap-2 py-2 px-3" role="alert">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0 mt-1" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-    <span class="small">广场仅展示<strong>成功创作</strong>且创作人<strong>勾选发布</strong>的作品；未发布的作品其他用户不可见。每日点赞排行前 5 名可获得 300/200/100/50/50 积分奖励（每日 0 点结算）。</span>
+    <span class="small">广场展示<strong>成功创作</strong>且创作人<strong>勾选发布</strong>的作品（含 NSFW 作品）；未发布的作品其他用户不可见。点赞只按作品计算，每日获赞前 5 名作者可获得 300/200/100/50/50 积分奖励（每日 0 点结算）。</span>
 </div>
-
-{{if .AllowNSFW}}
-<div class="d-flex justify-content-end mb-3">
-    {{if .IsLoggedIn}}
-    <div class="d-flex align-items-center gap-2">
-        <span class="small text-muted">显示 NSFW 作品</span>
-        <div class="form-check form-switch mb-0">
-            <input type="checkbox" class="form-check-input" id="nsfwToggle" role="switch" data-csrf="{{.CSRF}}" {{if .ShowNSFW}}checked{{end}}>
-            <label class="form-check-label small" for="nsfwToggle">{{if .ShowNSFW}}已开启{{else}}已关闭{{end}}</label>
-        </div>
-    </div>
-    {{else}}
-    <span class="small text-muted"><a href="/login?next={{.BackAfterNSFW}}" class="text-muted">登录后</a>可开启 NSFW 内容</span>
-    {{end}}
-</div>
-{{end}}
 
 <div class="row g-4">
     <div class="col-lg-8">
@@ -77,19 +61,25 @@
                 {{if gt (len .DailyRanking) 0}}
                 <ol class="rank-list list-unstyled mb-0">
                     {{range .DailyRanking}}
-                    <li class="d-flex align-items-center justify-content-between gap-2 py-2 border-bottom">
-                        <span class="d-flex align-items-center gap-2 min-w-0 flex-nowrap">
-                            <span class="rank-badge {{if eq .Rank 1}}rank-gold{{else if eq .Rank 2}}rank-silver{{else if eq .Rank 3}}rank-bronze{{else}}rank-plain{{end}} flex-shrink-0">{{.Rank}}</span>
-                            <a href="/square/user?u={{urlquery .Name}}" class="text-body text-decoration-none text-truncate" title="查看 {{.Name}} 的作品">{{.Name}}</a>
+                    <li class="d-flex align-items-center gap-2 py-2 border-bottom">
+                        <span class="rank-badge {{if eq .Rank 1}}rank-gold{{else if eq .Rank 2}}rank-silver{{else if eq .Rank 3}}rank-bronze{{else}}rank-plain{{end}} flex-shrink-0">{{.Rank}}</span>
+                        {{if .ImageURL}}
+                        <a href="{{.ImageURL}}" data-lightbox class="rank-thumb flex-shrink-0 d-block" title="查看作品大图">
+                            <img src="{{.ImageURL}}" alt="榜上作品" loading="lazy">
+                        </a>
+                        {{end}}
+                        <span class="min-w-0 flex-grow-1">
+                            <span class="d-block text-truncate small text-body copy-btn" role="button" tabindex="0" data-copy="{{.Prompt}}" data-copy-msg="提示词已复制" title="点击复制完整提示词">{{.PromptCut}}</span>
+                            <a href="/square/user?u={{urlquery .Username}}" class="small text-muted text-decoration-none" title="查看 {{.Username}} 的全部广场作品">{{.Username}}</a>
                         </span>
                         <span class="text-muted small text-nowrap">{{.Count}} 赞</span>
                     </li>
                     {{end}}
                 </ol>
                 {{else}}
-                <p class="text-muted small text-center py-3 mb-0">今天还没有人获得点赞</p>
+                <p class="text-muted small text-center py-3 mb-0">今天还没有作品获得点赞</p>
                 {{end}}
-                <p class="text-muted small mt-2 mb-0">今日点赞前 5 名分别获得 300 / 200 / 100 / 50 / 50 积分，每日 0 点结算</p>
+                <p class="text-muted small mt-2 mb-0">今日获赞前 5 名作者分别获得 300 / 200 / 100 / 50 / 50 积分，每日 0 点结算</p>
             </div>
         </div>
         <div class="card app-card">
@@ -98,17 +88,23 @@
                 {{if gt (len .WeekRanking) 0}}
                 <ol class="rank-list list-unstyled mb-0">
                     {{range .WeekRanking}}
-                    <li class="d-flex align-items-center justify-content-between gap-2 py-2 border-bottom">
-                        <span class="d-flex align-items-center gap-2 min-w-0 flex-nowrap">
-                            <span class="rank-badge {{if eq .Rank 1}}rank-gold{{else if eq .Rank 2}}rank-silver{{else if eq .Rank 3}}rank-bronze{{else}}rank-plain{{end}} flex-shrink-0">{{.Rank}}</span>
-                            <a href="/square/user?u={{urlquery .Name}}" class="text-body text-decoration-none text-truncate" title="查看 {{.Name}} 的作品">{{.Name}}</a>
+                    <li class="d-flex align-items-center gap-2 py-2 border-bottom">
+                        <span class="rank-badge {{if eq .Rank 1}}rank-gold{{else if eq .Rank 2}}rank-silver{{else if eq .Rank 3}}rank-bronze{{else}}rank-plain{{end}} flex-shrink-0">{{.Rank}}</span>
+                        {{if .ImageURL}}
+                        <a href="{{.ImageURL}}" data-lightbox class="rank-thumb flex-shrink-0 d-block" title="查看作品大图">
+                            <img src="{{.ImageURL}}" alt="榜上作品" loading="lazy">
+                        </a>
+                        {{end}}
+                        <span class="min-w-0 flex-grow-1">
+                            <span class="d-block text-truncate small text-body copy-btn" role="button" tabindex="0" data-copy="{{.Prompt}}" data-copy-msg="提示词已复制" title="点击复制完整提示词">{{.PromptCut}}</span>
+                            <a href="/square/user?u={{urlquery .Username}}" class="small text-muted text-decoration-none" title="查看 {{.Username}} 的全部广场作品">{{.Username}}</a>
                         </span>
                         <span class="text-muted small text-nowrap">{{.Count}} 赞</span>
                     </li>
                     {{end}}
                 </ol>
                 {{else}}
-                <p class="text-muted small text-center py-3 mb-0">最近 7 天还没有人获得点赞</p>
+                <p class="text-muted small text-center py-3 mb-0">最近 7 天还没有作品获得点赞</p>
                 {{end}}
             </div>
         </div>
@@ -144,22 +140,6 @@
     </div>
     <a href="/square" class="btn btn-outline-secondary btn-sm">← 返回广场</a>
 </div>
-
-{{if .AllowNSFW}}
-<div class="d-flex justify-content-end mb-3">
-    {{if .IsLoggedIn}}
-    <div class="d-flex align-items-center gap-2">
-        <span class="small text-muted">显示 NSFW 作品</span>
-        <div class="form-check form-switch mb-0">
-            <input type="checkbox" class="form-check-input" id="nsfwToggle" role="switch" data-csrf="{{.CSRF}}" {{if .ShowNSFW}}checked{{end}}>
-            <label class="form-check-label small" for="nsfwToggle">{{if .ShowNSFW}}已开启{{else}}已关闭{{end}}</label>
-        </div>
-    </div>
-    {{else}}
-    <span class="small text-muted"><a href="/login?next={{.BackAfterNSFW}}" class="text-muted">登录后</a>可开启 NSFW 内容</span>
-    {{end}}
-</div>
-{{end}}
 
 {{if gt (len .Cards) 0}}
 <div class="row g-3">

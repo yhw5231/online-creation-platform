@@ -1067,42 +1067,6 @@
   })();
 })();
 
-/* ---------- 创作广场：NSFW 显示开关 ---------- */
-(function nsfwToggle() {
-  var toggle = document.getElementById('nsfwToggle');
-  if (!toggle) return;
-  var csrf = toggle.getAttribute('data-csrf');
-  var label = document.querySelector('label[for="nsfwToggle"]');
-  toggle.addEventListener('change', function () {
-    var on = toggle.checked ? '1' : '0';
-    var formData = new FormData();
-    formData.append('on', on);
-    formData.append('_csrf', csrf);
-    fetch('/square/nsfw', {
-      method: 'POST',
-      headers: { 'X-Requested-With': 'XMLHttpRequest' },
-      body: formData,
-      credentials: 'same-origin'
-    }).then(function (resp) {
-      if (resp.redirected) { location.href = resp.url; return null; }
-      return resp.json();
-    }).then(function (data) {
-      if (!data) return;
-      if (data.ok) {
-        if (label) label.textContent = data.show_nsfw ? '已开启' : '已关闭';
-        // 刷新页面以应用新的 NSFW 过滤
-        location.reload();
-      } else {
-        showToast(data.error || '操作失败', 'error');
-        toggle.checked = !toggle.checked;
-      }
-    }).catch(function () {
-      showToast('网络异常，请重试', 'error');
-      toggle.checked = !toggle.checked;
-    });
-  });
-})();
-
 /* ---------- 创作页：NSFW 渠道提示 ---------- */
 (function nsfwCreateHint() {
   var channelSelect = document.getElementById('channelSelect');
@@ -1118,7 +1082,8 @@
   function updateHint() {
     var opt = channelSelect.options[channelSelect.selectedIndex];
     var isNsfw = opt && opt.getAttribute('data-nsfw') === 'true';
-    var squareNsfwAllowed = document.querySelector('form[data-submit]')?.getAttribute('data-square-nsfw') === '1';
+    var createForm = channelSelect.closest('form[data-square-nsfw]');
+    var squareNsfwAllowed = createForm && createForm.getAttribute('data-square-nsfw') === '1';
     if (isNsfw && !squareNsfwAllowed) {
       hint.style.display = 'block';
       if (isPublicCheck) { isPublicCheck.checked = false; isPublicCheck.disabled = true; }

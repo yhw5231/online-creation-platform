@@ -165,7 +165,7 @@
                                 <option value="true" {{if eq .Settings.square_allow_nsfw "true"}}selected{{end}}>允许</option>
                                 <option value="false" {{if ne .Settings.square_allow_nsfw "true"}}selected{{end}}>禁止</option>
                             </select>
-                            <div class="form-text">禁止时 NSFW 作品在创作时即使勾选"发布到广场"也不会生效；已登录用户可在广场手动开启"显示 NSFW 作品"开关。</div>
+                            <div class="form-text">禁止时 NSFW 作品在创作时即使勾选"发布到广场"也不会生效；允许时发布成功的 NSFW 作品在广场直接公开显示，不区分浏览者。</div>
                         </div>
                     </div>
                 </div>

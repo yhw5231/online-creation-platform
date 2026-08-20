@@ -486,7 +486,6 @@ func main() {
 	http.HandleFunc("/square", squareHandler)
 	http.HandleFunc("/square/user", squareUserHandler)
 	http.HandleFunc("/square/like", authMiddleware(squareLikeHandler))
-	http.HandleFunc("/square/nsfw", authMiddleware(squareNSFWHandler))
 	http.HandleFunc("/redeem", authMiddleware(rateLimited(redeemHandler)))
 	http.HandleFunc("/checkin", authMiddleware(checkinHandler))
 	http.HandleFunc("/points", authMiddleware(pointsHandler))
@@ -3118,30 +3117,11 @@ func squareAllowNSFW() bool {
 	return models.GetConfigOr("square_allow_nsfw", "false") == "true"
 }
 
-// viewerShowNSFW 判断当前浏览者是否可以看到 NSFW 广场作品：
-// 必须管理员允许 NSFW 发布、且用户已登录并主动开启「显示 NSFW」。
-// 未登录用户永远看不到 NSFW（无法开启）。
-func viewerShowNSFW(r *http.Request) bool {
-	if !squareAllowNSFW() {
-		return false
-	}
-	uid, _, _ := currentUser(r)
-	if uid <= 0 {
-		return false
-	}
-	var v int
-	models.DB.QueryRow("SELECT show_nsfw FROM users WHERE id=?", uid).Scan(&v)
-	return v == 1
-}
-
 // squareBaseWhere 是创作广场作品的公共查询条件：只展示成功、已发布、
 // 创作人仍为正常状态、且图片仍存在（本地或外部备份，未被清理/deleted）的作品。
-// showNSFW 为 true 时不排除 NSFW 作品（仅登录用户开启后生效）。
-func squareBaseWhere(showNSFW bool) string {
+// NSFW 作品不因浏览者偏好隐藏：创作时勾选发布、成功生成后即公开展示。
+func squareBaseWhere() string {
 	sqlWhere := "gr.status='success' AND gr.is_public=1 AND u.status=1"
-	if !showNSFW {
-		sqlWhere += " AND gr.nsfw=0"
-	}
 	// 广场不展示已删除、已被清理的作品：必须仍存在至少一张可用图片
 	// （本地路径或外部存储备份，二选一非空）。
 	sqlWhere += " AND EXISTS (SELECT 1 FROM generation_images gi WHERE gi.record_id=gr.id AND (gi.path != '' OR gi.storage_path != ''))"
@@ -3259,8 +3239,11 @@ func squareCards(r *http.Request, where, order string, args []interface{}, page,
 	return list, total
 }
 
-// likeRanking 计算点赞排行榜：kind = "daily" 按北京时间的当天点赞数排名，
-// kind = "week" 按最近 7 天点赞数排名；返回含排名/用户名/点赞数的列表。
+// likeRanking 计算作品点赞排行榜：kind = "daily" 按北京时间的当天点赞数排名，
+// kind = "week" 按最近 7 天点赞数排名。点赞只按作品统计：每个榜单项代表一个
+// 仍在广场展示的作品（含封面图、作者与该作品自身的点赞数），同一作者的不同
+// 作品分别上榜；作品取消发布、被删除、清理或作者停用后立即从榜单消失。
+// NSFW 作品与广场作品流一致，发布后正常参与排行。
 func likeRanking(kind string, limit int) []map[string]interface{} {
 	rankings := []map[string]interface{}{}
 	now := time.Now().In(beijingTZ)
@@ -3275,25 +3258,71 @@ func likeRanking(kind string, limit int) []map[string]interface{} {
 	default:
 		return rankings
 	}
-	rows, err := models.DB.Query(`SELECT u.username, COUNT(*) AS cnt
-		FROM creation_likes l JOIN users u ON u.id=l.user_id
-		WHERE u.status=1 AND `+sqlWhere+`
-		GROUP BY l.user_id ORDER BY cnt DESC, l.user_id ASC LIMIT ?`, limit)
+	rows, err := models.DB.Query(`SELECT gr.id, gr.prompt, u.username, COUNT(*) AS cnt
+		FROM creation_likes l
+		JOIN generation_records gr ON gr.id=l.record_id
+		JOIN users u ON u.id=gr.user_id
+		WHERE gr.status='success' AND gr.is_public=1 AND u.status=1
+		AND EXISTS (
+			SELECT 1 FROM generation_images gi
+			WHERE gi.record_id=gr.id AND (gi.path != '' OR gi.storage_path != '')
+		)
+		AND `+sqlWhere+`
+		GROUP BY gr.id, gr.prompt, u.username
+		ORDER BY cnt DESC, MIN(l.id) ASC, gr.id ASC LIMIT ?`, limit)
 	if err != nil {
 		return rankings
 	}
 	defer rows.Close()
+	var ids []int64
 	rank := 0
 	for rows.Next() {
-		var name string
+		var recordID int64
+		var prompt, username string
 		var cnt int64
-		if rows.Scan(&name, &cnt) == nil && cnt > 0 {
+		if rows.Scan(&recordID, &prompt, &username, &cnt) == nil && cnt > 0 {
 			rank++
 			rankings = append(rankings, map[string]interface{}{
-				"Rank":  rank,
-				"Name":  name,
-				"Count": cnt,
+				"Rank":      rank,
+				"ID":        recordID,
+				"Prompt":    prompt,
+				"PromptCut": truncateRunes(prompt, 40),
+				"Username":  username,
+				"Count":     cnt,
+				"ImageURL":  "",
 			})
+			ids = append(ids, recordID)
+		}
+	}
+	// 每件上榜作品的封面图：优选本地路径，其次外部存储备份（与广场作品流一致）
+	coverURL := map[int64]string{}
+	if len(ids) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		rowArgs := make([]interface{}, len(ids))
+		for i, rid := range ids {
+			rowArgs[i] = rid
+		}
+		rowsImg, err := models.DB.Query("SELECT record_id, path, storage_path FROM generation_images WHERE record_id IN ("+placeholders+") ORDER BY record_id, idx", rowArgs...)
+		if err == nil {
+			for rowsImg.Next() {
+				var rid int64
+				var p, sp string
+				if rowsImg.Scan(&rid, &p, &sp) == nil {
+					if _, ok := coverURL[rid]; !ok {
+						if p != "" {
+							coverURL[rid] = p
+						} else if sp != "" {
+							coverURL[rid] = sp
+						}
+					}
+				}
+			}
+			rowsImg.Close()
+		}
+	}
+	for _, item := range rankings {
+		if url := coverURL[item["ID"].(int64)]; url != "" {
+			item["ImageURL"] = url
 		}
 	}
 	return rankings
@@ -3313,8 +3342,7 @@ func squareHandler(w http.ResponseWriter, r *http.Request) {
 	if page < 1 {
 		page = 1
 	}
-	showNSFW := viewerShowNSFW(r)
-	where := squareBaseWhere(showNSFW)
+	where := squareBaseWhere()
 	order := "gr.id DESC"
 	cards, total := squareCards(r, where, order, nil, page, perPage)
 	totalPages := (total + perPage - 1) / perPage
@@ -3324,25 +3352,18 @@ func squareHandler(w http.ResponseWriter, r *http.Request) {
 	if page > totalPages {
 		page = totalPages
 	}
-	redirectBack := "/square"
-	if showNSFW {
-		redirectBack = "/square?nsfw=1"
-	}
 	renderPublicPage(w, r, "创作广场", "content-square", map[string]interface{}{
-		"Cards":         cards,
-		"Total":         total,
-		"Page":          page,
-		"TotalPages":    totalPages,
-		"HasPrev":       page > 1,
-		"HasNext":       page < totalPages,
-		"PrevPage":      page - 1,
-		"NextPage":      page + 1,
-		"PageBase":      "/square?",
-		"DailyRanking":  likeRanking("daily", 10),
-		"WeekRanking":   likeRanking("week", 10),
-		"AllowNSFW":     squareAllowNSFW(),
-		"ShowNSFW":      showNSFW,
-		"BackAfterNSFW": redirectBack,
+		"Cards":        cards,
+		"Total":        total,
+		"Page":         page,
+		"TotalPages":   totalPages,
+		"HasPrev":      page > 1,
+		"HasNext":      page < totalPages,
+		"PrevPage":     page - 1,
+		"NextPage":     page + 1,
+		"PageBase":     "/square?",
+		"DailyRanking": likeRanking("daily", 10),
+		"WeekRanking":  likeRanking("week", 10),
 	})
 }
 
@@ -3373,8 +3394,7 @@ func squareUserHandler(w http.ResponseWriter, r *http.Request) {
 	if page < 1 {
 		page = 1
 	}
-	showNSFW := viewerShowNSFW(r)
-	where := squareBaseWhere(showNSFW) + " AND gr.user_id=?"
+	where := squareBaseWhere() + " AND gr.user_id=?"
 	order := "gr.id DESC"
 	cards, total := squareCards(r, where, order, []interface{}{userID}, page, perPage)
 	totalPages := (total + perPage - 1) / perPage
@@ -3385,19 +3405,16 @@ func squareUserHandler(w http.ResponseWriter, r *http.Request) {
 		page = totalPages
 	}
 	renderPublicPage(w, r, username+" 的作品", "content-square-user", map[string]interface{}{
-		"Cards":         cards,
-		"SquareUser":    username,
-		"Total":         total,
-		"Page":          page,
-		"TotalPages":    totalPages,
-		"HasPrev":       page > 1,
-		"HasNext":       page < totalPages,
-		"PrevPage":      page - 1,
-		"NextPage":      page + 1,
-		"PageBase":      "/square/user?u=" + url.QueryEscape(username) + "&",
-		"AllowNSFW":     squareAllowNSFW(),
-		"ShowNSFW":      showNSFW,
-		"BackAfterNSFW": "/square/user?u=" + url.QueryEscape(username) + "&nsfw=1",
+		"Cards":      cards,
+		"SquareUser": username,
+		"Total":      total,
+		"Page":       page,
+		"TotalPages": totalPages,
+		"HasPrev":    page > 1,
+		"HasNext":    page < totalPages,
+		"PrevPage":   page - 1,
+		"NextPage":   page + 1,
+		"PageBase":   "/square/user?u=" + url.QueryEscape(username) + "&",
 	})
 }
 
@@ -3465,39 +3482,9 @@ func squareLikeHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "liked": liked, "count": count})
 }
 
-// squareNSFWHandler 切换当前登录用户的「显示 NSFW 广场作品」偏好：
-// 管理员未允许 NSFW 时强制关闭；仅登录用户可设置（未登录由中间件拦截）。
-func squareNSFWHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"ok": false, "error": "method not allowed"})
-		return
-	}
-	if !verifyCSRF(r) {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "表单已过期，请刷新页面后重试"})
-		return
-	}
-	userID, _, _ := currentUser(r)
-	on := r.FormValue("on") == "1"
-	if !squareAllowNSFW() {
-		on = false // 管理员关闭 NSFW 时不允许开启
-	}
-	if _, err := models.DB.Exec("UPDATE users SET show_nsfw=? WHERE id=?", bool2int(on), userID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "设置失败，请重试"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "show_nsfw": on})
-}
-
-// bool2int 将布尔值转换为 0/1。
-func bool2int(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-// settleLikeRanking 结算指定北京日期（YYYY-MM-DD）的每日点赞排行：
-// 点赞数前 5 名分别获得 300/200/100/50/50 积分。
+// settleLikeRanking 结算指定北京日期（YYYY-MM-DD）的每日点赞排行奖励：
+// 点赞只按作品计算，按当天各作品获赞数汇总到作品作者，前 5 名作者分别获得
+// 300/200/100/50/50 积分（同一作者多件作品获赞合并统计，同一作者每日仅得一份奖励）。
 // 幂等：已结算日期（like_daily_awards 已有记录）直接跳过。
 func settleLikeRanking(date string) {
 	var done int
@@ -3505,10 +3492,12 @@ func settleLikeRanking(date string) {
 	if done > 0 {
 		return
 	}
-	rows, err := models.DB.Query(`SELECT l.user_id, u.username, COUNT(*) AS cnt
-		FROM creation_likes l JOIN users u ON u.id=l.user_id
+	rows, err := models.DB.Query(`SELECT gr.user_id, u.username, COUNT(*) AS cnt
+		FROM creation_likes l
+		JOIN generation_records gr ON gr.id=l.record_id
+		JOIN users u ON u.id=gr.user_id
 		WHERE u.status=1 AND date(l.created_at, '+8 hours') = ?
-		GROUP BY l.user_id ORDER BY cnt DESC, l.user_id ASC LIMIT 5`, date)
+		GROUP BY gr.user_id ORDER BY cnt DESC, gr.user_id ASC LIMIT 5`, date)
 	if err != nil {
 		log.Printf("like ranking settle: %v", err)
 		return
