@@ -482,9 +482,10 @@ func main() {
 	http.HandleFunc("/records/delete", authMiddleware(recordDeleteHandler))
 	http.HandleFunc("/records/delete-failed", authMiddleware(recordDeleteFailedHandler))
 	http.HandleFunc("/records/publish", authMiddleware(recordPublishHandler))
-	// 创作广场：公开浏览（未登录可看作品与排行），点赞需登录
-	http.HandleFunc("/square", squareHandler)
-	http.HandleFunc("/square/user", squareUserHandler)
+	// 创作广场：作品、排行、创作人主页及相关操作均需登录后访问
+	http.HandleFunc("/square", authMiddleware(squareHandler))
+	http.HandleFunc("/square/user", authMiddleware(squareUserHandler))
+	http.HandleFunc("/square/nsfw", authMiddleware(squareNSFWPreferenceHandler))
 	http.HandleFunc("/square/like", authMiddleware(squareLikeHandler))
 	http.HandleFunc("/redeem", authMiddleware(rateLimited(redeemHandler)))
 	http.HandleFunc("/checkin", authMiddleware(checkinHandler))
@@ -2549,6 +2550,7 @@ func protectedSquareRecordIDs() map[int64]bool {
 //     已上传外部存储的图片保留记录与备用地址，仅移除本地文件）
 //   - cleanup_max_mb    data/images 目录超过该大小（MB）时，按旧到新
 //     删除本地图片文件直到低于上限
+//
 // 保护规则：近 7 天每日点赞前 10 / 7 天点赞前 10 的作品不清理（保留
 // 记录与图片文件，见 protectedSquareRecordIDs）。
 func cleanUpTask() {
@@ -2906,21 +2908,21 @@ func recordsHandler(w http.ResponseWriter, r *http.Request) {
 		pageBase += "q=" + url.QueryEscape(q) + "&"
 	}
 	renderPage(w, r, "layout.html", map[string]interface{}{
-		"Title":      "创作记录",
-		"Query":      q,
-		"Records":    recs,
-		"TotalCost":  totalCost,
+		"Title":       "创作记录",
+		"Query":       q,
+		"Records":     recs,
+		"TotalCost":   totalCost,
 		"FailedCount": failedCount,
-		"Page":       page,
-		"TotalPages": totalPages,
-		"Total":      total,
-		"HasPrev":    page > 1,
-		"HasNext":    page < totalPages,
-		"PrevPage":   page - 1,
-		"NextPage":   page + 1,
-		"PageBase":   pageBase,
-		"ViewMode":   viewMode,
-		"Content":    "content-records",
+		"Page":        page,
+		"TotalPages":  totalPages,
+		"Total":       total,
+		"HasPrev":     page > 1,
+		"HasNext":     page < totalPages,
+		"PrevPage":    page - 1,
+		"NextPage":    page + 1,
+		"PageBase":    pageBase,
+		"ViewMode":    viewMode,
+		"Content":     "content-records",
 	})
 }
 
@@ -3115,6 +3117,45 @@ func squareEnabled() bool {
 // squareAllowNSFW 判断管理员是否允许 NSFW 作品发布到广场。
 func squareAllowNSFW() bool {
 	return models.GetConfigOr("square_allow_nsfw", "false") == "true"
+}
+
+// userShowNSFW 返回登录用户是否选择在创作广场显示 NSFW 作品。
+// 默认关闭；读取失败时同样按关闭处理，避免意外暴露 NSFW 内容。
+func userShowNSFW(userID int64) bool {
+	if userID <= 0 {
+		return false
+	}
+	var show int
+	if err := models.DB.QueryRow("SELECT show_nsfw FROM users WHERE id=?", userID).Scan(&show); err != nil {
+		return false
+	}
+	return show == 1
+}
+
+// squareNSFWPreferenceHandler 保存当前用户的创作广场 NSFW 显示偏好。
+func squareNSFWPreferenceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !verifyCSRF(r) {
+		flashRedirect(w, r, "/square", "表单已过期，请刷新页面后重试")
+		return
+	}
+	userID, _, _ := currentUser(r)
+	show := 0
+	if r.FormValue("show_nsfw") == "1" {
+		show = 1
+	}
+	if _, err := models.DB.Exec("UPDATE users SET show_nsfw=? WHERE id=?", show, userID); err != nil {
+		flashRedirect(w, r, "/square", "设置保存失败，请重试")
+		return
+	}
+	message := "已屏蔽 NSFW 内容"
+	if show == 1 {
+		message = "已显示 NSFW 内容"
+	}
+	flashRedirect(w, r, "/square", message)
 }
 
 // squareBaseWhere 是创作广场作品的公共查询条件：只展示成功、已发布、
@@ -3349,7 +3390,12 @@ func squareHandler(w http.ResponseWriter, r *http.Request) {
 	if page < 1 {
 		page = 1
 	}
+	userID, _, _ := currentUser(r)
+	showNSFW := userShowNSFW(userID)
 	where := squareBaseWhere()
+	if !showNSFW {
+		where += " AND gr.nsfw=0"
+	}
 	order := "gr.id DESC"
 	cards, total := squareCards(r, where, order, nil, page, perPage)
 	totalPages := (total + perPage - 1) / perPage
@@ -3369,6 +3415,7 @@ func squareHandler(w http.ResponseWriter, r *http.Request) {
 		"PrevPage":     page - 1,
 		"NextPage":     page + 1,
 		"PageBase":     "/square?",
+		"ShowNSFW":     showNSFW,
 		"DailyRanking": likeRanking("daily", 10),
 		"WeekRanking":  likeRanking("week", 10),
 	})
@@ -3401,7 +3448,12 @@ func squareUserHandler(w http.ResponseWriter, r *http.Request) {
 	if page < 1 {
 		page = 1
 	}
+	viewerID, _, _ := currentUser(r)
+	showNSFW := userShowNSFW(viewerID)
 	where := squareBaseWhere() + " AND gr.user_id=?"
+	if !showNSFW {
+		where += " AND gr.nsfw=0"
+	}
 	order := "gr.id DESC"
 	cards, total := squareCards(r, where, order, []interface{}{userID}, page, perPage)
 	totalPages := (total + perPage - 1) / perPage
@@ -4705,30 +4757,30 @@ func adminDashboardHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	renderPage(w, r, "layout.html", map[string]interface{}{
-		"Title":         "数据概览",
-		"Users":         users,
-		"ActiveUsers":   activeUsers,
-		"TodayCheckins": todayCheckins,
-		"TodayNewUsers": todayReg,
-		"TodayGens":     todayGen,
-		"Records":       records,
-		"Images":        images,
-		"GenSuccess":    genSuccess,
-		"GenFailed":     genFailed,
-		"GenRate":       genRate,
+		"Title":           "数据概览",
+		"Users":           users,
+		"ActiveUsers":     activeUsers,
+		"TodayCheckins":   todayCheckins,
+		"TodayNewUsers":   todayReg,
+		"TodayGens":       todayGen,
+		"Records":         records,
+		"Images":          images,
+		"GenSuccess":      genSuccess,
+		"GenFailed":       genFailed,
+		"GenRate":         genRate,
 		"GenSuccessToday": genSuccessToday,
 		"GenFailedToday":  genFailedToday,
 		"GenRateToday":    genRateToday,
-		"Codes":         codes,
-		"CodesActive":   codesActive,
-		"CodesUsed":     codesUsed,
-		"CodesVoid":     codesVoid,
-		"IssuedPoints":  issuedPoints,
-		"SpentPoints":   spentPoints,
-		"RecentRecords": recentRecords,
-		"RecentUsers":   recentUsers,
-		"SecretDefault": sessionSecretDefault(),
-		"Content":       "content-dashboard",
+		"Codes":           codes,
+		"CodesActive":     codesActive,
+		"CodesUsed":       codesUsed,
+		"CodesVoid":       codesVoid,
+		"IssuedPoints":    issuedPoints,
+		"SpentPoints":     spentPoints,
+		"RecentRecords":   recentRecords,
+		"RecentUsers":     recentUsers,
+		"SecretDefault":   sessionSecretDefault(),
+		"Content":         "content-dashboard",
 	})
 }
 
@@ -7365,7 +7417,8 @@ func normalizeAspectRatio(ratio string) string {
 
 // openAISizeToParams 把 OpenAI 风格的 size（如 1024x1024）换算成
 // 本站的宽高比与分辨率档位。空值或无法解析时回退 1:1 + 1k。
-func openAISizeToParams(size string) (ratio, res string) {	size = strings.TrimSpace(strings.ToLower(size))
+func openAISizeToParams(size string) (ratio, res string) {
+	size = strings.TrimSpace(strings.ToLower(size))
 	var w, h int
 	if _, err := fmt.Sscanf(size, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
 		return "1:1", "1k"

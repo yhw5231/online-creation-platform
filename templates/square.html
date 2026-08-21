@@ -1,4 +1,4 @@
-{{define "content-square"}}
+﻿{{define "content-square"}}
 {{if .SquareDisabled}}
 <div class="card app-card">
     <div class="card-body">
@@ -19,11 +19,14 @@
         <span class="text-muted small">浏览用户发布到广场的 AI 作品，点赞为创作者加油，还能复制提示词一键再创作</span>
     </div>
     <div class="d-flex gap-2 flex-wrap align-items-center">
-        {{if .IsLoggedIn}}
+        <form method="POST" action="/square/nsfw" class="d-inline">
+            <input type="hidden" name="_csrf" value="{{.CSRF}}">
+            <input type="hidden" name="show_nsfw" value="{{if .ShowNSFW}}0{{else}}1{{end}}">
+            <button type="submit" class="btn btn-sm {{if .ShowNSFW}}btn-warning{{else}}btn-outline-secondary{{end}}" title="{{if .ShowNSFW}}点击屏蔽 NSFW 内容{{else}}点击显示 NSFW 内容{{end}}">
+                NSFW：{{if .ShowNSFW}}显示{{else}}屏蔽{{end}}
+            </button>
+        </form>
         <a href="/create" class="btn btn-primary btn-sm">＋ 发布作品</a>
-        {{else}}
-        <a href="/login?next=/create" class="btn btn-primary btn-sm">登录后创作发布</a>
-        {{end}}
     </div>
 </div>
 <div class="alert alert-info mb-3 d-flex align-items-start gap-2 py-2 px-3" role="alert">

@@ -898,8 +898,8 @@ func TestSettingsPersistence(t *testing.T) {
 
 	want := map[string]string{
 		"site_name": "测试站点", "generation_cost_points": "15",
-		"generation_fail_penalty":         "0.25",
-		"open_registration": "true", "enable_password_registration": "false",
+		"generation_fail_penalty": "0.25",
+		"open_registration":       "true", "enable_password_registration": "false",
 		"enable_thirdparty_registration": "true", "require_reg_code": "true",
 		"initial_points": "50", "enable_daily_checkin": "false",
 		"checkin_mode": "random", "checkin_fixed_points": "7",
@@ -2328,9 +2328,9 @@ func TestDashboardGenStats(t *testing.T) {
 	tpl = template.Must(tpl.ParseGlob("templates/admin/*.html"))
 
 	// 总计：成功 2、失败 1（成功率 66.7%）；今日：成功 1、失败 1（成功率 50.0%）
-	models.DB.Exec("INSERT INTO generation_records(user_id, prompt, cost_points, status, created_at) VALUES"+
-		"(1,'昨日成功',10,'success',datetime('now','-1 day')),"+
-		"(1,'今日成功',10,'success',datetime('now')),"+
+	models.DB.Exec("INSERT INTO generation_records(user_id, prompt, cost_points, status, created_at) VALUES" +
+		"(1,'昨日成功',10,'success',datetime('now','-1 day'))," +
+		"(1,'今日成功',10,'success',datetime('now'))," +
 		"(1,'今日失败',10,'failed',datetime('now'))")
 
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
@@ -3208,8 +3208,8 @@ func TestAdminUserManagement(t *testing.T) {
 
 // ------- 创作广场 / 点赞 / 一键删除失败记录 -------
 
-// TestSquareHandler 验证创作广场页正常渲染：公开访问返回 200，
-// 包含广场标题、今日点赞榜、7天点赞榜等区域。
+// TestSquareHandler 验证已登录用户访问创作广场时页面正常渲染，
+// 默认屏蔽 NSFW 内容，并包含广场标题、NSFW 开关及点赞榜等区域。
 func TestSquareHandler(t *testing.T) {
 	dir := t.TempDir()
 	if err := models.InitDB(filepath.Join(dir, "t.db")); err != nil {
@@ -3244,26 +3244,23 @@ func TestSquareHandler(t *testing.T) {
 	models.DB.Exec(`CREATE TABLE IF NOT EXISTS creation_likes (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(record_id, user_id))`)
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/square", nil)
+	req := authenticatedRequest(t, http.MethodGet, "/square", 1, "u1", "")
+	req.Header.Del("Content-Type")
 	squareHandler(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d want 200", w.Code)
 	}
 	body := w.Body.String()
-	for _, s := range []string{"创作广场", "广场作品1", "广场作品2", "今日点赞榜", "7 天点赞榜", "登录后创作发布"} {
+	for _, s := range []string{"创作广场", "广场作品1", "广场作品2", "今日点赞榜", "7 天点赞榜", "NSFW：屏蔽", "＋ 发布作品"} {
 		if !strings.Contains(body, s) {
 			t.Errorf("square page should contain %q", s)
 		}
 	}
-	// 未发布、失败记录不应出现在广场；已发布的 NSFW 作品正常展示
-	if strings.Contains(body, "未发布作品") {
-		t.Error("square page should not contain unpublished record")
-	}
-	if !strings.Contains(body, "nsfw作品") {
-		t.Error("square page should contain published NSFW record")
-	}
-	if strings.Contains(body, "失败作品") {
-		t.Error("square page should not contain failed record")
+	// 默认偏好屏蔽 NSFW；未发布和失败记录也不应出现在广场。
+	for _, s := range []string{"未发布作品", "nsfw作品", "失败作品"} {
+		if strings.Contains(body, s) {
+			t.Errorf("square page should not contain %q", s)
+		}
 	}
 }
 
@@ -3811,32 +3808,37 @@ func TestSquareNSFWVisibility(t *testing.T) {
 	models.DB.Exec("INSERT INTO generation_images(record_id, idx, path) VALUES(1,0,'/images/a.png'),(2,0,'/images/b.png'),(3,0,'/images/c.png')")
 
 	for _, tc := range []struct {
-		name string
-		uid  int64
+		name       string
+		uid        int64
+		username   string
+		wantNSFW   bool
+		wantToggle string
 	}{
-		{name: "logged-out", uid: 0},
-		{name: "logged-in show_nsfw=0", uid: 1},
-		{name: "logged-in show_nsfw=1", uid: 2},
+		{name: "show_nsfw=0", uid: 1, username: "u1", wantNSFW: false, wantToggle: "NSFW：屏蔽"},
+		{name: "show_nsfw=1", uid: 2, username: "u2", wantNSFW: true, wantToggle: "NSFW：显示"},
 	} {
-		var req *http.Request
-		if tc.uid > 0 {
-			req = authenticatedRequest(t, http.MethodGet, "/square", tc.uid, "u1", "")
+		t.Run(tc.name, func(t *testing.T) {
+			req := authenticatedRequest(t, http.MethodGet, "/square", tc.uid, tc.username, "")
 			req.Header.Del("Content-Type")
-		} else {
-			req = httptest.NewRequest(http.MethodGet, "/square", nil)
-		}
-		w := httptest.NewRecorder()
-		squareHandler(w, req)
-		body := w.Body.String()
-		if !strings.Contains(body, "NSFW作品") {
-			t.Errorf("%s should see published NSFW work", tc.name)
-		}
-		if strings.Contains(body, "NSFW未发布") {
-			t.Errorf("%s should NOT see unpublished NSFW work", tc.name)
-		}
-		if !strings.Contains(body, "普通作品") {
-			t.Errorf("%s should see normal work", tc.name)
-		}
+			w := httptest.NewRecorder()
+			squareHandler(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d want 200", w.Code)
+			}
+			body := w.Body.String()
+			if strings.Contains(body, "NSFW作品") != tc.wantNSFW {
+				t.Errorf("NSFW visibility=%v want %v", strings.Contains(body, "NSFW作品"), tc.wantNSFW)
+			}
+			if strings.Contains(body, "NSFW未发布") {
+				t.Error("unpublished NSFW work should never be visible")
+			}
+			if !strings.Contains(body, "普通作品") {
+				t.Error("normal work should be visible")
+			}
+			if !strings.Contains(body, tc.wantToggle) {
+				t.Errorf("page should contain toggle state %q", tc.wantToggle)
+			}
+		})
 	}
 }
 
