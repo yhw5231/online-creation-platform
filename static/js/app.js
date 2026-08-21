@@ -1078,8 +1078,7 @@
   if (!channelSelect || !isPublicLabel) return;
   var nsfwLink = isPublicLabel.querySelector('strong');
   var hint = document.createElement('span');
-  hint.className = 'text-warning small d-block mt-1';
-  hint.style.display = 'none';
+  hint.className = 'text-warning small mt-1 d-none';
   hint.textContent = '当前为 NSFW 渠道，管理员未允许 NSFW 作品发布到创作广场，取消勾选。';
   isPublicLabel.appendChild(hint);
   function updateHint() {
