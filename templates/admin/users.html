@@ -67,7 +67,7 @@
                                 <form method="POST" action="/admin/user/adjust-points" class="d-flex gap-1" data-submit="loading">
                                     <input type="hidden" name="_csrf" value="{{$.CSRF}}">
                                     <input type="hidden" name="id" value="{{.ID}}">
-                                    <input type="number" name="delta" class="form-control form-control-sm" style="width: 84px" placeholder="±积分" step="1" min="-100000" max="100000" autocomplete="off">
+                                    <input type="number" name="delta" class="form-control form-control-sm" style="width: 112px" placeholder="±积分" step="1" min="-999999999" max="999999999" autocomplete="off">
                                     <button type="submit" class="btn btn-sm btn-outline-info btn-loading" data-loading-text="..." data-confirm="确认调整该用户的积分余额？负数表示扣除，正数表示追加。">调整</button>
                                 </form>
                             </div>

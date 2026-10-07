@@ -4645,8 +4645,8 @@ func adminAdjustPointsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.FormValue("id")
 	delta, err := strconv.ParseInt(r.FormValue("delta"), 10, 64)
-	if err != nil || delta == 0 || delta > 100000 || delta < -100000 {
-		http.Error(w, "积分值无效（范围 ±100000）", http.StatusBadRequest)
+	if err != nil || delta == 0 || delta > 999999999 || delta < -999999999 {
+		http.Error(w, "积分值无效（范围 ±999999999）", http.StatusBadRequest)
 		return
 	}
 	// 扣减积分需要余额充足，避免把用户余额扣成负数（与服务端其他扣费口径一致）
