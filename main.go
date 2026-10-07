@@ -1562,6 +1562,8 @@ func profileHandler(w http.ResponseWriter, r *http.Request) {
 		"APIKeys":      keyRows,
 		"KeyChannels":  allChannels(),
 		"NewAPIKey":    newKey,
+		// 一键复制给智能体的接入说明：刚生成 Key 时直接带上明文，省去手工替换
+		"AgentBrief": apiAgentBrief(requestBaseURL(r), newKey),
 		"OAuthEnabled": oauthEnabled(),
 		"OAuthProvider": func() string {
 			var p string
@@ -6081,15 +6083,7 @@ func shortHex() string {
 //   - 管理后台展示“应在 Linux.do 开发者后台填写的 Callback URL”；
 //   - Redirect URI 未配置时兜底使用，保证授权流程可用。
 func linuxdoRequestCallback(r *http.Request) string {
-	host := r.Host
-	if host == "" {
-		host = "localhost"
-	}
-	scheme := "http"
-	if r.TLS != nil || strings.HasPrefix(strings.ToLower(r.Header.Get("X-Forwarded-Proto")), "https") {
-		scheme = "https"
-	}
-	return scheme + "://" + host + "/auth/linuxdo/callback"
+	return requestBaseURL(r) + "/auth/linuxdo/callback"
 }
 
 // linuxdoCallbackURL 返回 Linux.do OAuth 实际使用的回调地址：优先取后台已保存
@@ -7479,9 +7473,71 @@ func waitGenerationDone(recordID int64, timeout time.Duration) ([]string, string
 }
 
 // ------------------------- API 文档页 -------------------------
+
+// requestBaseURL 按当前请求推断站点根地址（含协议），用于在页面展示可直接
+// 粘贴给智能体的接口地址；反向代理下遵循 X-Forwarded-Proto。
+func requestBaseURL(r *http.Request) string {
+	host := r.Host
+	if host == "" {
+		host = "localhost"
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.HasPrefix(strings.ToLower(r.Header.Get("X-Forwarded-Proto")), "https") {
+		scheme = "https"
+	}
+	return scheme + "://" + host
+}
+
+// apiAgentBrief 生成一段自包含的中文接入说明，供用户一键复制后直接交给 AI
+// 智能体使用：包含服务地址、认证方式、接口协议、响应格式、错误码与 curl 示例。
+// key 为空（未生成新 Key）时用占位符代替，提示用户自行替换。
+func apiAgentBrief(baseURL, key string) string {
+	if key == "" {
+		key = "sk-在此填入你的APIKey"
+	}
+	return fmt.Sprintf(`你正在对接「%s」的 AI 图片生成接口，请按以下信息调用。
+
+【服务地址】
+%s
+
+【认证】
+所有接口都需要在请求头中携带 API Key（二选一）：
+  Authorization: Bearer %s
+  X-API-Key: %s
+该 Key 已绑定固定的生成渠道，请求中无需也不能指定渠道。
+
+【生成图片】
+POST %s/v1/images/generations
+Content-Type: application/json
+请求体字段（OpenAI Images API 兼容，同步返回结果）：
+  prompt          必填，提示词，最长 4000 字
+  model           可选，须为 Key 所绑定渠道支持的模型，留空用渠道默认模型
+  n               可选，生成数量 1-4，默认 1
+  size            可选，如 1024x1024 / 1792x1024 / 1024x1792，默认 1024x1024
+  response_format 可选，url（默认，返回图片地址）或 b64_json
+成功响应示例：
+  {"created":1750000000,"data":[{"url":"/images/xxx.png"}]}
+data[].url 为相对路径，前面拼接服务地址即可下载图片。
+
+【查询可用渠道（可选）】
+GET %s/api/v1/channels
+返回渠道编号、名称、支持的模型与分辨率档位。
+
+【错误码】
+400 参数错误 / 401 Key 无效 / 402 积分不足（本次未扣分）/ 405 方法错误 / 500 系统繁忙（积分已退回）
+
+【curl 示例】
+curl -X POST %s/v1/images/generations \
+  -H "Authorization: Bearer %s" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"一只猫","n":1,"size":"1024x1024"}'
+`, siteName(), baseURL, key, key, baseURL, baseURL, baseURL, key)
+}
+
 func apiDocsHandler(w http.ResponseWriter, r *http.Request) {
 	renderPage(w, r, "layout.html", map[string]interface{}{
-		"Title":   "API 文档",
-		"Content": "content-api-docs",
+		"Title":      "API 文档",
+		"AgentBrief": apiAgentBrief(requestBaseURL(r), ""),
+		"Content":    "content-api-docs",
 	})
 }

@@ -61,15 +61,22 @@
         <div class="card app-card mb-4 fade-in-up">
             <div class="card-body p-4">
                 <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-                    <div>
+                    <div class="flex-grow-1">
                         <h6 class="fw-bold mb-1">API Key（OpenAI 兼容接口）</h6>
                         <div class="text-muted small">
                             可生成多个命名 Key，每个 Key 固定绑定一个渠道；调用 <code>POST /v1/images/generations</code>（OpenAI 格式）生成图片，积分规则与网页一致。
                         </div>
                         {{if .NewAPIKey}}
-                            <div class="alert alert-warning alert-dismissible fade show mt-2 py-2 small" role="alert">
-                                <strong>新 Key（仅显示一次）：</strong> <code>{{.NewAPIKey}}</code>
-                                <button type="button" class="btn-close btn-sm" data-bs-dismiss="alert"></button>
+                            <div class="alert alert-warning mt-2 mb-0 py-3 w-100" role="alert" id="newApiKeyBox">
+                                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                                    <strong class="small">新 API Key（仅显示一次，请立即复制保存）</strong>
+                                    <div class="d-flex gap-2">
+                                        <button type="button" class="btn btn-sm btn-warning copy-btn" data-copy="{{.NewAPIKey}}" data-copy-msg="API Key 已复制到剪贴板">复制</button>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" id="newApiKeyToggle" title="切换明文 / 遮蔽显示">隐藏</button>
+                                    </div>
+                                </div>
+                                <input type="text" class="form-control form-control-sm font-monospace mt-2" id="newApiKeyValue" value="{{.NewAPIKey}}" readonly spellcheck="false" autocomplete="off" aria-label="新生成的 API Key" title="点击可全选，再按 Ctrl+C 复制">
+                                <div class="small text-muted mt-2">数据库只保存哈希，离开本页后无法再次查看明文；下方「接入说明」已填入本 Key，可一键复制交给智能体。</div>
                             </div>
                         {{end}}
                     </div>
@@ -125,7 +132,20 @@
                         <button type="submit" class="btn btn-outline-primary btn-sm w-100">生成 API Key</button>
                     </div>
                 </form>
-                <div class="text-muted small mt-2">Key 明文仅显示一次，请立即复制保存；使用 <code>Authorization: Bearer &lt;key&gt;</code> 调用 <code>/v1/images/generations</code>。</div>
+                <div class="text-muted small mt-2">Key 明文仅显示一次，请立即复制保存。</div>
+
+                <hr class="my-3">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <div>
+                        <div class="small fw-semibold">接入说明（协议 / 地址 / 认证）</div>
+                        <div class="text-muted small mt-1">整段说明可一键复制后直接发给 AI 智能体，它就能按下面的协议调用本站接口{{if .NewAPIKey}}（已自动填入你刚生成的 Key）{{else}}（Key 处为占位符，请替换成自己的 Key）{{end}}。说明中含 Key 明文，请只发给你信任的智能体。</div>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <button type="button" class="btn btn-sm btn-outline-primary copy-btn" data-copy-target="#agentBrief" data-copy-msg="接入说明已复制，可直接粘贴给智能体">一键复制给智能体</button>
+                        <a href="/api/docs" class="btn btn-sm btn-outline-secondary">完整文档</a>
+                    </div>
+                </div>
+                <textarea id="agentBrief" class="form-control form-control-sm font-monospace mt-2" rows="16" readonly spellcheck="false" aria-label="可一键复制给 AI 智能体的接入说明">{{.AgentBrief}}</textarea>
             </div>
         </div>
 

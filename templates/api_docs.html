@@ -8,6 +8,14 @@
             </div>
             <div class="card-body p-4 p-md-5">
 
+                <h6 class="fw-bold">0. 一键复制给智能体</h6>
+                <p class="small text-muted mb-2">把下面这段说明整段复制给 AI 智能体（ChatGPT / Claude / Cursor 等），它就能按协议调用本站接口；复制前请把 Key 占位符替换成自己在<a href="/profile">个人主页</a>生成的 Key（在个人主页复制时会自动填入）。说明中含 Key 明文，请只发给你信任的智能体。</p>
+                <div class="d-flex justify-content-end mb-2">
+                    <button type="button" class="btn btn-sm btn-outline-primary copy-btn" data-copy-target="#agentBrief" data-copy-msg="接入说明已复制，可直接粘贴给智能体">一键复制</button>
+                </div>
+                <textarea id="agentBrief" class="form-control form-control-sm font-monospace" rows="16" readonly spellcheck="false" aria-label="可一键复制给 AI 智能体的接入说明">{{.AgentBrief}}</textarea>
+
+                <hr>
                 <h6 class="fw-bold">1. 获取 API Key</h6>
                 <p class="small text-muted mb-1">登录后进入 <a href="/profile">个人主页</a> →「API Key」卡片：</p>
                 <ul class="small text-muted mb-3 ps-3">

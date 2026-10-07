@@ -617,11 +617,40 @@
   }
   document.querySelectorAll('.copy-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
-      var code = btn.getAttribute('data-copy') || '';
+      var text = btn.getAttribute('data-copy');
+      if (text === null) {
+        // data-copy-target：从目标元素取值（如只读 textarea 中的整段接入说明）
+        var sel = btn.getAttribute('data-copy-target') || '';
+        var el = sel ? document.querySelector(sel) : null;
+        text = el ? (typeof el.value === 'string' ? el.value : (el.textContent || '')) : '';
+      }
       var msg = btn.getAttribute('data-copy-msg') || '已复制到剪贴板';
-      copyText(code, msg);
+      copyText(text, msg);
     });
   });
+
+  /* ---------- 个人主页：新生成的 API Key 展示（全选 / 明文切换） ---------- */
+  var newKeyBox = document.getElementById('newApiKeyBox');
+  if (newKeyBox) {
+    var newKeyInput = document.getElementById('newApiKeyValue');
+    var newKeyToggle = document.getElementById('newApiKeyToggle');
+    if (newKeyInput) {
+      // 点击或聚焦即全选，便于直接 Ctrl+C
+      newKeyInput.addEventListener('focus', function () { this.select(); });
+      newKeyInput.addEventListener('click', function () { this.select(); });
+    }
+    if (newKeyInput && newKeyToggle) {
+      newKeyToggle.addEventListener('click', function () {
+        var hidden = newKeyInput.type === 'password';
+        newKeyInput.type = hidden ? 'text' : 'password';
+        newKeyToggle.textContent = hidden ? '隐藏' : '显示';
+      });
+    }
+    // 生成后自动定位到新 Key，避免用户没看到就离开页面
+    if (newKeyBox.scrollIntoView) {
+      setTimeout(function () { newKeyBox.scrollIntoView({ block: 'center' }); }, 150);
+    }
+  }
 
   /* ---------- 创作页：生成任务异步轮询 ---------- */
   var taskDetailBox = document.getElementById('taskDetail');
